@@ -38,10 +38,16 @@ CONTAINER_IMAGE = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"
 
 EXPECTED_PACKAGES = {
     "flash-attn": "2.5.5",
+    "mujoco": "3.3.2",
+    "numpy": "1.26.3",
+    "protobuf": "3.20.3",
     "robosuite": "1.4.0",
     "tensorflow": "2.15.0",
+    "tensorflow-datasets": "4.9.3",
+    "tensorflow-metadata": "1.15.0",
     "torch": "2.2.0",
     "transformers": "4.40.1",
+    "wandb": "0.16.6",
 }
 
 MAX_STEPS = {
