@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,11 @@ from embodied_silent_failures.artifacts import (
     prepare_trial,
     safe_stem,
     write_json_atomic,
+)
+from embodied_silent_failures.faults import (
+    FAULT_SITES,
+    FaultSpec,
+    TransientActivationFault,
 )
 from embodied_silent_failures.plan import (
     Trial,
@@ -74,6 +80,13 @@ class Arguments:
     wait_steps: int
     save_video: bool
     resume: bool
+    fault_site: str | None
+    fault_layer: int | None
+    fault_policy_step: int | None
+    fault_generation_step: int
+    fault_bit_index: int | None
+    fault_seed: int
+    paired_clean_dirs: list[Path]
 
 
 @dataclass(frozen=True)
@@ -117,8 +130,49 @@ def _parse_arguments() -> Arguments:
         default=True,
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--fault-site", choices=FAULT_SITES)
+    parser.add_argument("--fault-layer", type=int)
+    parser.add_argument("--fault-policy-step", type=int)
+    parser.add_argument("--fault-generation-step", type=int, default=0)
+    parser.add_argument("--fault-bit-index", type=int)
+    parser.add_argument("--fault-seed", type=int, default=0)
+    parser.add_argument(
+        "--paired-clean-dir",
+        dest="paired_clean_dirs",
+        action="append",
+        type=Path,
+        default=[],
+    )
     namespace = parser.parse_args()
     return Arguments(**vars(namespace))
+
+
+def _fault_spec(args: Arguments) -> FaultSpec | None:
+    if args.fault_site is None:
+        if any(
+            value is not None
+            for value in (
+                args.fault_layer,
+                args.fault_policy_step,
+                args.fault_bit_index,
+            )
+        ):
+            raise ValueError("fault options require --fault-site")
+        if args.paired_clean_dirs:
+            raise ValueError("--paired-clean-dir requires --fault-site")
+        return None
+    if args.fault_policy_step is None:
+        raise ValueError("--fault-site requires --fault-policy-step")
+    if not args.paired_clean_dirs:
+        raise ValueError("--fault-site requires at least one --paired-clean-dir")
+    return FaultSpec(
+        site=args.fault_site,
+        layer=args.fault_layer,
+        policy_step=args.fault_policy_step,
+        generation_step=args.fault_generation_step,
+        bit_index=args.fault_bit_index,
+        seed=args.fault_seed,
+    )
 
 
 def _git_revision(path: Path) -> str:
@@ -133,6 +187,7 @@ def _git_revision(path: Path) -> str:
 
 
 def _validate_inputs(args: Arguments) -> None:
+    _fault_spec(args)
     for name, path in {
         "checkpoint": args.checkpoint,
         "OpenVLA root": args.openvla_root,
@@ -140,6 +195,9 @@ def _validate_inputs(args: Arguments) -> None:
     }.items():
         if not path.is_dir():
             raise FileNotFoundError(f"{name} is not a directory: {path}")
+    for path in args.paired_clean_dirs:
+        if not path.is_dir():
+            raise FileNotFoundError(f"paired clean directory is not a directory: {path}")
 
     if CHECKPOINT_REVISION not in args.checkpoint.resolve().parts:
         raise RuntimeError(
@@ -300,7 +358,12 @@ def _git_dirty(path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def _run_metadata(args: Arguments, runtime: Runtime, plan: list[Trial]) -> dict[str, Any]:
+def _run_metadata(
+    args: Arguments,
+    runtime: Runtime,
+    plan: list[Trial],
+    fault_spec: FaultSpec | None,
+) -> dict[str, Any]:
     package_versions = {
         package: importlib.metadata.version(package) for package in EXPECTED_PACKAGES
     }
@@ -315,12 +378,15 @@ def _run_metadata(args: Arguments, runtime: Runtime, plan: list[Trial]) -> dict[
     config["openvla_root"] = str(args.openvla_root.resolve())
     config["libero_root"] = str(args.libero_root.resolve())
     config["output_dir"] = str(args.output_dir.resolve())
+    config["paired_clean_dirs"] = [
+        str(path.resolve()) for path in args.paired_clean_dirs
+    ]
     config.pop("resume")
 
     project_root = Path(__file__).resolve().parents[1]
     return {
         "schema_version": 1,
-        "condition": "clean",
+        "condition": "activation_fault" if fault_spec else "clean",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "configuration": config,
         "trial_count": len(plan),
@@ -328,6 +394,7 @@ def _run_metadata(args: Arguments, runtime: Runtime, plan: list[Trial]) -> dict[
             {**trial.to_dict(), "seed": seed_for_trial(args.seed, trial)}
             for trial in plan
         ],
+        "fault_model": fault_spec.to_dict() if fault_spec else None,
         "upstream_revisions": {
             "experiment_code": _git_revision(project_root),
             "experiment_code_dirty": _git_dirty(project_root),
@@ -370,6 +437,52 @@ def _prepare_run(args: Arguments, metadata: dict[str, Any]) -> None:
         raise ValueError("resume configuration does not match the existing run")
     if existing.get("trial_plan") != metadata["trial_plan"]:
         raise ValueError("resume trial plan does not match the existing run")
+
+
+def _paired_clean_results(
+    directories: list[Path], plan: list[Trial]
+) -> tuple[list[Trial], dict[Trial, dict[str, Any]]]:
+    indexed: dict[Trial, dict[str, Any]] = {}
+    requested = set(plan)
+    for directory in directories:
+        for path in sorted(directory.glob("*.complete.json")):
+            with path.open("r", encoding="utf-8") as file:
+                result = json.load(file)
+            if result.get("status") != "complete" or result.get("condition") != "clean":
+                raise ValueError(f"paired reference is not a completed clean rollout: {path}")
+            trial = Trial(
+                task_id=int(result["task_id"]),
+                episode_index=int(result["episode_index"]),
+            )
+            if trial not in requested:
+                continue
+            if trial in indexed:
+                fields = (
+                    "initial_state_sha256",
+                    "trial_seed",
+                    "success",
+                    "policy_steps",
+                )
+                if any(indexed[trial].get(key) != result.get(key) for key in fields):
+                    raise ValueError(f"paired clean results conflict for {trial}")
+                continue
+            indexed[trial] = result
+
+    missing = [trial for trial in plan if trial not in indexed]
+    if missing:
+        preview = ", ".join(
+            f"{trial.task_id}/{trial.episode_index}" for trial in missing[:5]
+        )
+        raise FileNotFoundError(f"missing paired clean results for {preview}")
+
+    eligible = [trial for trial in plan if indexed[trial].get("success") is True]
+    if not eligible:
+        raise ValueError("none of the paired clean rollouts succeeded")
+    for trial in eligible:
+        clean_steps = int(indexed[trial]["policy_steps"])
+        if clean_steps <= 0:
+            raise ValueError(f"paired clean rollout has invalid length for {trial}")
+    return eligible, indexed
 
 
 def _numeric_observation(runtime: Runtime, observation: dict[str, Any]) -> dict[str, Any]:
@@ -453,6 +566,7 @@ def _run_trial(
     initial_state: Any,
     trial_seed: int,
     initial_state_sha256: str,
+    fault_injector: TransientActivationFault | None,
 ) -> dict[str, Any]:
     runtime.torch.cuda.reset_peak_memory_stats()
     rollout_started = time.perf_counter()
@@ -469,6 +583,8 @@ def _run_trial(
     inference_seconds: list[float] = []
     simulator_seconds: list[float] = []
     success = False
+    if fault_injector is not None:
+        fault_injector.begin_trial(trial_seed)
 
     for policy_step in range(MAX_STEPS[args.task_suite]):
         image = runtime.get_libero_image(observation, resize_size)
@@ -483,7 +599,12 @@ def _run_trial(
 
         runtime.torch.cuda.synchronize()
         inference_started = time.perf_counter()
-        with runtime.torch.inference_mode():
+        fault_context = (
+            fault_injector.inference(policy_step)
+            if fault_injector is not None
+            else nullcontext()
+        )
+        with runtime.torch.inference_mode(), fault_context:
             raw_actions, generated = runtime.get_action(
                 model_config,
                 model,
@@ -528,6 +649,11 @@ def _run_trial(
             "timing/inference_seconds": inference_seconds[-1],
         }
         row.update({f"action/{key}": value for key, value in metrics.items()})
+        if fault_injector is not None:
+            record = fault_injector.record
+            row["fault/injected"] = bool(
+                record is not None and record["policy_step"] == policy_step
+            )
 
         simulator_started = time.perf_counter()
         observation, reward, done, _ = env.step(action.tolist())
@@ -542,6 +668,10 @@ def _run_trial(
             break
 
     rollout_seconds = time.perf_counter() - rollout_started
+    fault_record = (
+        fault_injector.require_injected() if fault_injector is not None else None
+    )
+    condition = "activation_fault" if fault_record else "clean"
 
     stem = safe_stem(trial, success)
     csv_path = args.output_dir / f"{stem}.csv"
@@ -564,6 +694,8 @@ def _run_trial(
         {
             "hidden_states": hidden_states,
             "observations": _stack_observations(runtime, observation_history),
+            "condition": condition,
+            "fault": fault_record,
             "task_suite_name": args.task_suite,
             "task_id": trial.task_id,
             "task_description": task_description,
@@ -579,7 +711,7 @@ def _run_trial(
     result = {
         "schema_version": 1,
         "status": "complete",
-        "condition": "clean",
+        "condition": condition,
         "task_suite_name": args.task_suite,
         "task_id": trial.task_id,
         "task_description": task_description,
@@ -595,6 +727,7 @@ def _run_trial(
         "simulator_seconds": sum(simulator_seconds),
         "artifact_seconds": artifact_seconds,
         "peak_cuda_memory_bytes": runtime.torch.cuda.max_memory_allocated(),
+        "fault": fault_record,
         "files": {
             "csv": csv_path.name,
             "pickle": pickle_path.name,
@@ -607,6 +740,7 @@ def _run_trial(
 
 def main() -> None:
     args = _parse_arguments()
+    fault_spec = _fault_spec(args)
     task_ids = parse_task_ids(args.task_ids)
     plan = build_trial_plan(
         task_ids,
@@ -615,8 +749,29 @@ def main() -> None:
         args.episode_stride,
     )
     _validate_inputs(args)
+    paired_clean: dict[Trial, dict[str, Any]] = {}
+    if fault_spec is not None:
+        requested_count = len(plan)
+        plan, paired_clean = _paired_clean_results(args.paired_clean_dirs, plan)
+        too_short = [
+            trial
+            for trial in plan
+            if int(paired_clean[trial]["policy_steps"]) <= fault_spec.policy_step
+        ]
+        if too_short:
+            preview = ", ".join(
+                f"{trial.task_id}/{trial.episode_index}" for trial in too_short[:5]
+            )
+            raise ValueError(
+                f"fault policy step {fault_spec.policy_step} is not before paired "
+                f"clean completion for {preview}"
+            )
+        print(
+            f"fault eligibility: {len(plan)} clean successes selected from "
+            f"{requested_count} paired rollouts"
+        )
     runtime = _load_runtime(args.openvla_root, args.libero_root)
-    metadata = _run_metadata(args, runtime, plan)
+    metadata = _run_metadata(args, runtime, plan, fault_spec)
     _prepare_run(args, metadata)
 
     benchmark_class = runtime.benchmark.get_benchmark_dict()[args.task_suite]
@@ -665,6 +820,11 @@ def main() -> None:
             )
         model_config.unnorm_key = alternate_key
 
+    fault_injector = None
+    if fault_spec is not None:
+        fault_injector = TransientActivationFault(runtime.torch, fault_spec)
+        fault_injector.install(model)
+
     completed = 0
     successes = 0
     for task_id in task_ids:
@@ -682,6 +842,18 @@ def main() -> None:
                 runtime.set_seed_everywhere(trial_seed)
                 initial_state = initial_states_by_task[task_id][trial.episode_index]
                 initial_state_sha256 = _array_sha256(runtime, initial_state)
+                if fault_spec is not None:
+                    clean_result = paired_clean[trial]
+                    if clean_result.get("initial_state_sha256") != initial_state_sha256:
+                        raise ValueError(
+                            f"paired clean initial state does not match task "
+                            f"{trial.task_id}, episode {trial.episode_index}"
+                        )
+                    if clean_result.get("trial_seed") != trial_seed:
+                        raise ValueError(
+                            f"paired clean seed does not match task {trial.task_id}, "
+                            f"episode {trial.episode_index}"
+                        )
                 print(
                     f"[{index}/{len(plan)}] running task {trial.task_id}, "
                     f"episode {trial.episode_index}, seed {trial_seed}"
@@ -698,6 +870,7 @@ def main() -> None:
                     initial_state,
                     trial_seed,
                     initial_state_sha256,
+                    fault_injector,
                 )
                 completed += 1
                 successes += int(result["success"])
@@ -714,6 +887,8 @@ def main() -> None:
             f"run complete: {completed} new trials, {successes} successes "
             f"({successes / completed:.1%})"
         )
+    if fault_injector is not None:
+        fault_injector.close()
 
 
 if __name__ == "__main__":

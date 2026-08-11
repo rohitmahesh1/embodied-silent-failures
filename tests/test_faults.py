@@ -1,0 +1,54 @@
+import unittest
+
+from embodied_silent_failures.faults import (
+    FaultSpec,
+    _event_seed,
+    _indices_for_flat_index,
+)
+
+
+class FaultTests(unittest.TestCase):
+    def test_fault_spec_distinguishes_shared_and_action_only_sites(self) -> None:
+        shared = FaultSpec("decoder_layer", 15, 50, 0, None, 3)
+        action_only = FaultSpec("action_logits", None, 50, 0, 7, 3)
+
+        self.assertEqual(shared.layer, 15)
+        self.assertIsNone(action_only.layer)
+        self.assertEqual(shared.to_dict()["evidence_relation"], "directly_shared")
+        self.assertEqual(
+            action_only.to_dict()["evidence_relation"],
+            "post_tap_with_autoregressive_feedback",
+        )
+        with self.assertRaises(ValueError):
+            FaultSpec("decoder_layer", None, 50, 0, None, 3)
+        with self.assertRaises(ValueError):
+            FaultSpec("action_logits", 15, 50, 0, None, 3)
+
+    def test_fault_spec_rejects_invalid_time_and_bit_values(self) -> None:
+        invalid = [
+            ("decoder_layer", 0, -1, 0, None, 0),
+            ("decoder_layer", 0, 0, -1, None, 0),
+            ("decoder_layer", 0, 0, 7, None, 0),
+            ("decoder_layer", 0, 0, 0, -1, 0),
+            ("decoder_layer", 0, 0, 0, None, -1),
+        ]
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                FaultSpec(*values)
+
+    def test_fault_location_seed_is_stable_and_trial_specific(self) -> None:
+        spec = FaultSpec("decoder_layer", 15, 50, 0, None, 3)
+        self.assertEqual(_event_seed(spec, 7), _event_seed(spec, 7))
+        self.assertNotEqual(_event_seed(spec, 7), _event_seed(spec, 8))
+        self.assertNotEqual(
+            _event_seed(spec, 7),
+            _event_seed(FaultSpec("decoder_layer", 16, 50, 0, None, 3), 7),
+        )
+
+    def test_flat_indices_are_recorded_in_tensor_coordinates(self) -> None:
+        self.assertEqual(_indices_for_flat_index((2, 3, 4), 0), [0, 0, 0])
+        self.assertEqual(_indices_for_flat_index((2, 3, 4), 23), [1, 2, 3])
+
+
+if __name__ == "__main__":
+    unittest.main()

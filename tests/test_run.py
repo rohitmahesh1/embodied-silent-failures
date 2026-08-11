@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from embodied_silent_failures.run_openvla import (
     Arguments,
     _array_sha256,
+    _paired_clean_results,
     _prepare_run,
 )
+from embodied_silent_failures.plan import Trial
 
 
 class RunTests(unittest.TestCase):
@@ -28,6 +30,13 @@ class RunTests(unittest.TestCase):
             wait_steps=10,
             save_video=True,
             resume=resume,
+            fault_site=None,
+            fault_layer=None,
+            fault_policy_step=None,
+            fault_generation_step=0,
+            fault_bit_index=None,
+            fault_seed=0,
+            paired_clean_dirs=[],
         )
 
     def test_prepare_run_supports_only_matching_resumes(self) -> None:
@@ -72,6 +81,34 @@ class RunTests(unittest.TestCase):
         self.assertNotEqual(digest, _array_sha256(runtime, Array(b"values", (2, 1), "<f4")))
         self.assertNotEqual(digest, _array_sha256(runtime, Array(b"values", (1, 2), "<f8")))
         self.assertNotEqual(digest, _array_sha256(runtime, Array(b"changed", (1, 2), "<f4")))
+
+    def test_paired_clean_results_select_only_successful_references(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            clean_dir = Path(directory)
+            for episode, success in ((0, True), (1, False)):
+                value = {
+                    "status": "complete",
+                    "condition": "clean",
+                    "task_id": 0,
+                    "episode_index": episode,
+                    "initial_state_sha256": f"state-{episode}",
+                    "trial_seed": 10 + episode,
+                    "success": success,
+                    "policy_steps": 100,
+                }
+                path = clean_dir / f"task0--ep{episode}.complete.json"
+                path.write_text(json.dumps(value), encoding="utf-8")
+
+            plan = [Trial(0, 0), Trial(0, 1)]
+            eligible, indexed = _paired_clean_results([clean_dir], plan)
+
+            self.assertEqual(eligible, [Trial(0, 0)])
+            self.assertEqual(set(indexed), set(plan))
+
+    def test_paired_clean_results_reject_missing_references(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(FileNotFoundError):
+                _paired_clean_results([Path(directory)], [Trial(0, 0)])
 
 
 if __name__ == "__main__":
