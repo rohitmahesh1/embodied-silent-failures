@@ -13,6 +13,7 @@ from embodied_silent_failures.analysis import (
     summarize_by_fault_field,
     summarize_outcomes,
 )
+from embodied_silent_failures.score_safe import alarm_windows
 
 
 class AnalysisTests(unittest.TestCase):
@@ -67,6 +68,18 @@ class AnalysisTests(unittest.TestCase):
             alarm_from_score_band([0.1], [0.2], start_step=1)
         with self.assertRaises(ValueError):
             alarm_from_score_band([0.1, 0.2], [0.2], stop_step=2)
+
+    def test_safe_alarm_windows_start_at_the_fault(self) -> None:
+        alarms = alarm_windows(
+            scores=[0.9, 0.1, 0.2, 0.1, 0.1, 0.1, 0.8],
+            alphas=[0.1],
+            bands=[[0.5] * 7],
+            fault_step=1,
+        )["0.1"]
+
+        self.assertFalse(alarms["within_5_steps"]["triggered"])
+        self.assertTrue(alarms["post_fault_any"]["triggered"])
+        self.assertEqual(alarms["post_fault_any"]["first_step"], 6)
 
     def test_pair_categories_preserve_the_causal_denominator(self) -> None:
         cases = [
