@@ -317,6 +317,9 @@ def main() -> None:
 
     output = {
         "schema_version": 2,
+        "experiment_code_revision": _git_revision(
+            Path(__file__).resolve().parents[1]
+        ),
         "monitor": {
             "directory": str(args.monitor_dir.resolve()),
             "checkpoint_sha256": _sha256(monitor_paths["checkpoint"]),
