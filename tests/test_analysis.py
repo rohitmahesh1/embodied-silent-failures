@@ -7,6 +7,7 @@ from embodied_silent_failures.analysis import (
     PRESERVED_SUCCESS,
     SILENT_FAULT_FAILURE,
     Alarm,
+    alarm_from_score_band,
     alarm_from_scores,
     classify_pair,
     summarize_by_fault_field,
@@ -47,6 +48,25 @@ class AnalysisTests(unittest.TestCase):
     def test_alarm_reports_first_threshold_crossing(self) -> None:
         self.assertEqual(alarm_from_scores([0.1, 0.5, 0.7], 0.5), Alarm(True, 1))
         self.assertEqual(alarm_from_scores([0.1, 0.2], 0.5), Alarm(False, None))
+
+    def test_time_varying_alarm_respects_the_post_fault_window(self) -> None:
+        scores = [0.9, 0.1, 0.4, 0.8]
+        thresholds = [0.5, 0.5, 0.3, 0.7]
+
+        self.assertEqual(
+            alarm_from_score_band(scores, thresholds, start_step=1, stop_step=3),
+            Alarm(True, 2),
+        )
+        self.assertEqual(
+            alarm_from_score_band(scores, thresholds, start_step=1, stop_step=2),
+            Alarm(False, None),
+        )
+
+    def test_time_varying_alarm_rejects_invalid_windows_and_bands(self) -> None:
+        with self.assertRaises(ValueError):
+            alarm_from_score_band([0.1], [0.2], start_step=1)
+        with self.assertRaises(ValueError):
+            alarm_from_score_band([0.1, 0.2], [0.2], stop_step=2)
 
     def test_pair_categories_preserve_the_causal_denominator(self) -> None:
         cases = [

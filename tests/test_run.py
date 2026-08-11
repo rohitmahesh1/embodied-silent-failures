@@ -23,6 +23,7 @@ class RunTests(unittest.TestCase):
             output_dir=output_dir,
             task_suite="libero_10",
             task_ids="0",
+            trial_manifest=None,
             episode_start=0,
             episode_stop=1,
             episode_stride=1,

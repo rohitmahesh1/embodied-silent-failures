@@ -1,5 +1,7 @@
 import hashlib
+import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True, order=True)
@@ -71,3 +73,34 @@ def build_trial_plan(
         for task_id in task_ids
         for episode_index in range(episode_start, episode_stop, episode_stride)
     ]
+
+
+def load_trial_manifest(path: Path) -> list[Trial]:
+    if not path.is_file():
+        raise FileNotFoundError(f"trial manifest is not a file: {path}")
+    with path.open(encoding="utf-8") as file:
+        value = json.load(file)
+
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("trial manifest must be an object with schema_version 1")
+    records = value.get("trials")
+    if not isinstance(records, list) or not records:
+        raise ValueError("trial manifest must contain a nonempty trials list")
+
+    trials = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"trial manifest entry {index} is not an object")
+        task_id = record.get("task_id")
+        episode_index = record.get("episode_index")
+        if type(task_id) is not int or task_id < 0:
+            raise ValueError(f"trial manifest entry {index} has an invalid task_id")
+        if type(episode_index) is not int or episode_index < 0:
+            raise ValueError(
+                f"trial manifest entry {index} has an invalid episode_index"
+            )
+        trials.append(Trial(task_id=task_id, episode_index=episode_index))
+
+    if len(trials) != len(set(trials)):
+        raise ValueError("trial manifest contains duplicate task/episode pairs")
+    return sorted(trials)

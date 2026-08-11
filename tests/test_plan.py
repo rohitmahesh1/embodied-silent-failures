@@ -1,8 +1,12 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from embodied_silent_failures.plan import (
     Trial,
     build_trial_plan,
+    load_trial_manifest,
     parse_task_ids,
     seed_for_trial,
 )
@@ -53,6 +57,48 @@ class PlanTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             seed_for_trial(-1, trial)
+
+    def test_load_trial_manifest_returns_unique_sorted_trials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trials.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "trials": [
+                            {"task_id": 2, "episode_index": 7},
+                            {"task_id": 0, "episode_index": 3},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                load_trial_manifest(path),
+                [Trial(0, 3), Trial(2, 7)],
+            )
+
+    def test_load_trial_manifest_rejects_invalid_entries(self) -> None:
+        invalid_values = [
+            {},
+            {"schema_version": 1, "trials": []},
+            {"schema_version": 1, "trials": [{"task_id": True, "episode_index": 0}]},
+            {
+                "schema_version": 1,
+                "trials": [
+                    {"task_id": 0, "episode_index": 1},
+                    {"task_id": 0, "episode_index": 1},
+                ],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trials.json"
+            for value in invalid_values:
+                with self.subTest(value=value):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        load_trial_manifest(path)
 
 
 if __name__ == "__main__":

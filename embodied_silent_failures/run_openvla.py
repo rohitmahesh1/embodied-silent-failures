@@ -32,6 +32,7 @@ from embodied_silent_failures.faults import (
 from embodied_silent_failures.plan import (
     Trial,
     build_trial_plan,
+    load_trial_manifest,
     parse_task_ids,
     seed_for_trial,
 )
@@ -73,6 +74,7 @@ class Arguments:
     output_dir: Path
     task_suite: str
     task_ids: str
+    trial_manifest: Path | None
     episode_start: int
     episode_stop: int
     episode_stride: int
@@ -119,6 +121,7 @@ def _parse_arguments() -> Arguments:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--task-suite", choices=sorted(MAX_STEPS), default="libero_10")
     parser.add_argument("--task-ids", default="0-9")
+    parser.add_argument("--trial-manifest", type=Path)
     parser.add_argument("--episode-start", type=int, default=0)
     parser.add_argument("--episode-stop", type=int, default=50)
     parser.add_argument("--episode-stride", type=int, default=1)
@@ -378,6 +381,9 @@ def _run_metadata(
     config["openvla_root"] = str(args.openvla_root.resolve())
     config["libero_root"] = str(args.libero_root.resolve())
     config["output_dir"] = str(args.output_dir.resolve())
+    config["trial_manifest"] = (
+        str(args.trial_manifest.resolve()) if args.trial_manifest else None
+    )
     config["paired_clean_dirs"] = [
         str(path.resolve()) for path in args.paired_clean_dirs
     ]
@@ -408,6 +414,9 @@ def _run_metadata(
                 args.checkpoint / "dataset_statistics.json"
             ),
         },
+        "trial_manifest_sha256": (
+            _sha256(args.trial_manifest) if args.trial_manifest else None
+        ),
         "machine": {
             "hostname": socket.gethostname(),
             "platform": platform.platform(),
@@ -741,13 +750,17 @@ def _run_trial(
 def main() -> None:
     args = _parse_arguments()
     fault_spec = _fault_spec(args)
-    task_ids = parse_task_ids(args.task_ids)
-    plan = build_trial_plan(
-        task_ids,
-        args.episode_start,
-        args.episode_stop,
-        args.episode_stride,
-    )
+    if args.trial_manifest is None:
+        task_ids = parse_task_ids(args.task_ids)
+        plan = build_trial_plan(
+            task_ids,
+            args.episode_start,
+            args.episode_stop,
+            args.episode_stride,
+        )
+    else:
+        plan = load_trial_manifest(args.trial_manifest)
+        task_ids = sorted({trial.task_id for trial in plan})
     _validate_inputs(args)
     paired_clean: dict[Trial, dict[str, Any]] = {}
     if fault_spec is not None:

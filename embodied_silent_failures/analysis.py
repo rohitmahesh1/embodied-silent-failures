@@ -46,6 +46,33 @@ def alarm_from_scores(scores: Sequence[float], threshold: float) -> Alarm:
     return Alarm(triggered=False, first_step=None)
 
 
+def alarm_from_score_band(
+    scores: Sequence[float],
+    thresholds: Sequence[float],
+    start_step: int = 0,
+    stop_step: int | None = None,
+) -> Alarm:
+    if not scores:
+        raise ValueError("monitor scores cannot be empty")
+    if stop_step is None:
+        stop_step = len(scores)
+    if start_step < 0 or stop_step <= start_step or stop_step > len(scores):
+        raise ValueError("alarm window must be a nonempty range within the scores")
+    if len(thresholds) < stop_step:
+        raise ValueError("monitor threshold band is shorter than the alarm window")
+
+    for step in range(start_step, stop_step):
+        score = scores[step]
+        threshold = thresholds[step]
+        if not math.isfinite(score):
+            raise ValueError(f"monitor score at step {step} is not finite")
+        if not math.isfinite(threshold):
+            raise ValueError(f"monitor threshold at step {step} is not finite")
+        if score >= threshold:
+            return Alarm(triggered=True, first_step=step)
+    return Alarm(triggered=False, first_step=None)
+
+
 def classify_pair(
     clean_result: dict[str, Any],
     fault_result: dict[str, Any],
