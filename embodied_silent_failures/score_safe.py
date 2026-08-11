@@ -1,12 +1,13 @@
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from embodied_silent_failures.analysis import alarm_from_score_band
+from embodied_silent_failures.analysis import Alarm
 from embodied_silent_failures.artifacts import write_json_atomic
 
 
@@ -82,6 +83,7 @@ def alarm_windows(
     alphas: Sequence[float],
     bands: Sequence[Sequence[float]],
     fault_step: int,
+    nonfinite_is_alarm: bool = False,
 ) -> dict[str, dict[str, dict[str, int | bool | None]]]:
     if len(alphas) != len(bands):
         raise ValueError("each monitor alpha must have one threshold band")
@@ -97,8 +99,12 @@ def alarm_windows(
                 if horizon is None
                 else min(len(scores), fault_step + horizon)
             )
-            alarm = alarm_from_score_band(
-                scores, band, start_step=fault_step, stop_step=stop_step
+            alarm = _alarm_from_band(
+                scores,
+                band,
+                start_step=fault_step,
+                stop_step=stop_step,
+                nonfinite_is_alarm=nonfinite_is_alarm,
             )
             windows[name] = {
                 "triggered": alarm.triggered,
@@ -106,6 +112,30 @@ def alarm_windows(
             }
         result[format(alpha, "g")] = windows
     return result
+
+
+def _alarm_from_band(
+    scores: Sequence[float],
+    thresholds: Sequence[float],
+    start_step: int,
+    stop_step: int,
+    nonfinite_is_alarm: bool,
+) -> Alarm:
+    if start_step < 0 or stop_step <= start_step or stop_step > len(scores):
+        raise ValueError("alarm window must be a nonempty range within the scores")
+    if len(thresholds) < stop_step:
+        raise ValueError("monitor threshold band is shorter than the alarm window")
+
+    for step in range(start_step, stop_step):
+        score = scores[step]
+        threshold = thresholds[step]
+        if not math.isfinite(threshold):
+            raise ValueError(f"monitor threshold at step {step} is not finite")
+        if nonfinite_is_alarm and not math.isfinite(score):
+            return Alarm(triggered=True, first_step=step)
+        if score >= threshold:
+            return Alarm(triggered=True, first_step=step)
+    return Alarm(triggered=False, first_step=None)
 
 
 def _validate_monitor(monitor_dir: Path) -> tuple[dict[str, Any], dict[str, Path]]:
@@ -220,8 +250,6 @@ def main() -> None:
         for index, (_, rollout, _) in enumerate(chunk):
             length = len(rollout.hidden_states)
             values = padded[index, :length].detach().cpu().numpy().astype(np.float32)
-            if not np.isfinite(values).all():
-                raise ValueError("SAFE produced a non-finite fault-trace score")
             scores.append(values)
 
     maximum_length = bands.shape[1]
@@ -236,6 +264,7 @@ def main() -> None:
             raise ValueError("fault trace is longer than the frozen monitor band")
         padded_scores[row, : len(values)] = values
         fault = completion["fault"]
+        nonfinite_steps = np.flatnonzero(~np.isfinite(values))
         records.append(
             {
                 "run": label,
@@ -244,8 +273,22 @@ def main() -> None:
                 "success": bool(completion["success"]),
                 "length": len(values),
                 "fault": fault,
+                "score_validity": {
+                    "all_finite": not bool(len(nonfinite_steps)),
+                    "nonfinite_count": int(len(nonfinite_steps)),
+                    "first_nonfinite_step": (
+                        int(nonfinite_steps[0]) if len(nonfinite_steps) else None
+                    ),
+                },
                 "alarms": alarm_windows(
                     values.tolist(), alphas, bands, int(fault["policy_step"])
+                ),
+                "finite_guard_alarms": alarm_windows(
+                    values.tolist(),
+                    alphas,
+                    bands,
+                    int(fault["policy_step"]),
+                    nonfinite_is_alarm=True,
                 ),
             }
         )
@@ -273,7 +316,7 @@ def main() -> None:
     temporary_scores.replace(scores_path)
 
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
         "monitor": {
             "directory": str(args.monitor_dir.resolve()),
             "checkpoint_sha256": _sha256(monitor_paths["checkpoint"]),
@@ -284,6 +327,10 @@ def main() -> None:
         },
         "safe_revision": SAFE_REVISION,
         "alarm_rule": "score >= frozen time-varying upper band",
+        "nonfinite_score_policy": {
+            "alarms": "Use SAFE's threshold comparison; NaN does not trigger.",
+            "finite_guard_alarms": "Trigger on a non-finite score or a threshold crossing.",
+        },
         "alarm_windows": ALARM_WINDOWS,
         "score_archive": {
             "path": str(scores_path.resolve()),

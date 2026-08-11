@@ -81,6 +81,24 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(alarms["post_fault_any"]["triggered"])
         self.assertEqual(alarms["post_fault_any"]["first_step"], 6)
 
+    def test_safe_alarm_windows_report_nonfinite_policy_separately(self) -> None:
+        values = [0.1, float("nan"), 0.1]
+        arguments = {
+            "scores": values,
+            "alphas": [0.1],
+            "bands": [[0.5] * len(values)],
+            "fault_step": 1,
+        }
+
+        native = alarm_windows(**arguments)["0.1"]["post_fault_any"]
+        guarded = alarm_windows(
+            **arguments, nonfinite_is_alarm=True
+        )["0.1"]["post_fault_any"]
+
+        self.assertFalse(native["triggered"])
+        self.assertTrue(guarded["triggered"])
+        self.assertEqual(guarded["first_step"], 1)
+
     def test_pair_categories_preserve_the_causal_denominator(self) -> None:
         cases = [
             (True, True, False, PRESERVED_SUCCESS),
