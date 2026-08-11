@@ -86,6 +86,21 @@ def _indices_for_flat_index(shape: tuple[int, ...], flat_index: int) -> list[int
     return list(reversed(indices))
 
 
+def _active_token_flat_index(
+    shape: tuple[int, ...], feature_index: int
+) -> int:
+    if len(shape) != 3 or shape[0] != 1:
+        raise ValueError(
+            "fault injection expects a batch-one [batch, sequence, feature] tensor"
+        )
+    sequence_length, feature_count = shape[1], shape[2]
+    if sequence_length <= 0 or feature_count <= 0:
+        raise ValueError("fault injection received an empty sequence or feature axis")
+    if not 0 <= feature_index < feature_count:
+        raise IndexError(f"feature index {feature_index} is outside [0, {feature_count})")
+    return (sequence_length - 1) * feature_count + feature_index
+
+
 def _replace_first_tensor(torch: Any, output: Any, replacement: Any) -> Any:
     if isinstance(output, torch.Tensor):
         return replacement
@@ -201,7 +216,9 @@ class TransientActivationFault:
             )
 
         rng = random.Random(_event_seed(self.spec, trial_seed))
-        flat_index = rng.randrange(tensor.numel())
+        shape = tuple(tensor.shape)
+        feature_index = rng.randrange(shape[-1])
+        flat_index = _active_token_flat_index(shape, feature_index)
         bit_index = (
             self.spec.bit_index
             if self.spec.bit_index is not None
@@ -229,12 +246,14 @@ class TransientActivationFault:
         before_value = float(tensor.reshape(-1)[flat_index].item())
         after_value = float(value_view[flat_index].item())
         unsigned_mask = (1 << width) - 1
-        shape = tuple(tensor.shape)
         record = {
             **self.spec.to_dict(),
             "trial_seed": trial_seed,
+            "tensor_scope": "final_sequence_token",
             "tensor_shape": list(shape),
             "tensor_dtype": str(tensor.dtype),
+            "sequence_index": shape[1] - 1,
+            "feature_index": feature_index,
             "flat_index": flat_index,
             "indices": _indices_for_flat_index(shape, flat_index),
             "actual_bit_index": bit_index,

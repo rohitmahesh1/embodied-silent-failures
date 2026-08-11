@@ -2,6 +2,7 @@ import unittest
 
 from embodied_silent_failures.faults import (
     FaultSpec,
+    _active_token_flat_index,
     _event_seed,
     _indices_for_flat_index,
 )
@@ -48,6 +49,16 @@ class FaultTests(unittest.TestCase):
     def test_flat_indices_are_recorded_in_tensor_coordinates(self) -> None:
         self.assertEqual(_indices_for_flat_index((2, 3, 4), 0), [0, 0, 0])
         self.assertEqual(_indices_for_flat_index((2, 3, 4), 23), [1, 2, 3])
+
+    def test_fault_targets_a_feature_in_the_active_sequence_token(self) -> None:
+        flat_index = _active_token_flat_index((1, 5, 4), feature_index=2)
+
+        self.assertEqual(flat_index, 18)
+        self.assertEqual(_indices_for_flat_index((1, 5, 4), flat_index), [0, 4, 2])
+        with self.assertRaises(ValueError):
+            _active_token_flat_index((2, 5, 4), feature_index=2)
+        with self.assertRaises(IndexError):
+            _active_token_flat_index((1, 5, 4), feature_index=4)
 
 
 if __name__ == "__main__":
