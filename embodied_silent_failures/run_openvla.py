@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from embodied_silent_failures.artifacts import (
     completion_path,
+    exclusion_path,
     prepare_trial,
     safe_stem,
     write_json_atomic,
@@ -54,6 +55,18 @@ LIBERO_REVISION = "8f1084e3132a39270c3a13ebe37270a43ece2a01"
 CHECKPOINT_REVISION = "80970322773f81baa2e22fe495d0487b93a05cfa"
 CONTAINER_IMAGE = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"
 REPLAY_OBSERVATION_TOLERANCE = 1e-6
+
+
+class CounterfactualReplayDivergence(RuntimeError):
+    def __init__(self, policy_step: int, error: float):
+        self.policy_step = policy_step
+        self.error = error
+        super().__init__(
+            f"counterfactual replay diverged at step {policy_step}: "
+            f"maximum numeric observation error {error:.3g} exceeds "
+            f"{REPLAY_OBSERVATION_TOLERANCE:.3g}"
+        )
+
 
 EXPECTED_PACKAGES = {
     "flash-attn": "2.5.5",
@@ -521,6 +534,31 @@ def _prepare_run(args: Arguments, metadata: dict[str, Any]) -> None:
     if existing.get("trial_plan") != metadata["trial_plan"]:
         raise ValueError("resume trial plan does not match the existing run")
 
+    current_revision = metadata["upstream_revisions"]["experiment_code"]
+    initial_revision = existing["upstream_revisions"]["experiment_code"]
+    resume_revisions = existing.setdefault("resume_code_revisions", [])
+    recorded_revisions = {
+        initial_revision,
+        *(record["experiment_code"] for record in resume_revisions),
+    }
+    if current_revision not in recorded_revisions:
+        resume_revisions.append(
+            {
+                "resumed_at": metadata["created_at"],
+                "experiment_code": current_revision,
+                "experiment_code_dirty": metadata["upstream_revisions"][
+                    "experiment_code_dirty"
+                ],
+                "existing_completion_count": len(
+                    list(args.output_dir.glob("*.complete.json"))
+                ),
+                "existing_exclusion_count": len(
+                    list(args.output_dir.glob("*.excluded.json"))
+                ),
+            }
+        )
+        write_json_atomic(path, existing)
+
 
 def _paired_clean_results(
     directories: list[Path], plan: list[Trial]
@@ -688,11 +726,7 @@ def _run_trial(
             )
             replay_maximum_error = max(replay_maximum_error, error)
             if error > REPLAY_OBSERVATION_TOLERANCE:
-                raise RuntimeError(
-                    f"counterfactual replay diverged at step {policy_step}: "
-                    f"maximum numeric observation error {error:.3g} exceeds "
-                    f"{REPLAY_OBSERVATION_TOLERANCE:.3g}"
-                )
+                raise CounterfactualReplayDivergence(policy_step, error)
 
         if clean_trace is not None and intervention_step is not None and policy_step < intervention_step:
             image = runtime.get_libero_image(observation, resize_size)
@@ -1019,10 +1053,11 @@ def main() -> None:
     indexed_plan = list(enumerate(plan, start=1))
     pending: list[tuple[int, Trial]] = []
     for index, trial in indexed_plan:
-        if prepare_trial(args.output_dir, trial, args.resume):
+        terminal_state = prepare_trial(args.output_dir, trial, args.resume)
+        if terminal_state is not None:
             print(
-                f"[{index}/{len(plan)}] skipping completed task {trial.task_id}, "
-                f"episode {trial.episode_index}"
+                f"[{index}/{len(plan)}] skipping {terminal_state} task "
+                f"{trial.task_id}, episode {trial.episode_index}"
             )
         else:
             pending.append((index, trial))
@@ -1045,6 +1080,7 @@ def main() -> None:
         model_config.unnorm_key = alternate_key
 
     completed = 0
+    excluded = 0
     successes = 0
     for task_id in task_ids:
         task_trials = [item for item in pending if item[1].task_id == task_id]
@@ -1089,23 +1125,55 @@ def main() -> None:
                     )
                     fault_injector.install(model)
                 try:
-                    result = _run_trial(
-                        args,
-                        runtime,
-                        model_config,
-                        model,
-                        processor,
-                        trial,
-                        env,
-                        task_description,
-                        initial_state,
-                        trial_seed,
-                        initial_state_sha256,
-                        run_condition,
-                        fault_injector,
-                        clean_trace,
-                        trial_stale_image_spec,
-                    )
+                    try:
+                        result = _run_trial(
+                            args,
+                            runtime,
+                            model_config,
+                            model,
+                            processor,
+                            trial,
+                            env,
+                            task_description,
+                            initial_state,
+                            trial_seed,
+                            initial_state_sha256,
+                            run_condition,
+                            fault_injector,
+                            clean_trace,
+                            trial_stale_image_spec,
+                        )
+                    except CounterfactualReplayDivergence as error:
+                        intervention_step = (
+                            trial_fault_spec.policy_step
+                            if trial_fault_spec is not None
+                            else trial_stale_image_spec.policy_step
+                        )
+                        write_json_atomic(
+                            exclusion_path(args.output_dir, trial),
+                            {
+                                "schema_version": 1,
+                                "status": "excluded",
+                                "reason": "counterfactual_replay_diverged_before_intervention",
+                                "condition": run_condition,
+                                "task_suite_name": args.task_suite,
+                                "task_id": trial.task_id,
+                                "episode_index": trial.episode_index,
+                                "trial_seed": trial_seed,
+                                "initial_state_sha256": initial_state_sha256,
+                                "intervention_policy_step": intervention_step,
+                                "divergence_policy_step": error.policy_step,
+                                "maximum_numeric_observation_error": error.error,
+                                "observation_tolerance": REPLAY_OBSERVATION_TOLERANCE,
+                                "clean_source_directory": str(clean_trace.source_dir),
+                            },
+                        )
+                        excluded += 1
+                        print(
+                            f"excluded task {trial.task_id}, episode "
+                            f"{trial.episode_index}: {error}"
+                        )
+                        continue
                 finally:
                     if fault_injector is not None:
                         fault_injector.close()
@@ -1119,10 +1187,15 @@ def main() -> None:
         finally:
             env.close()
 
-    if completed:
+    if completed or excluded:
+        success_summary = (
+            f", {successes} successes ({successes / completed:.1%})"
+            if completed
+            else ""
+        )
         print(
-            f"run complete: {completed} new trials, {successes} successes "
-            f"({successes / completed:.1%})"
+            f"run complete: {completed} new trials{success_summary}, "
+            f"{excluded} excluded"
         )
 
 

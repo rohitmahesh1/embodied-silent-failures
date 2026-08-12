@@ -5,6 +5,7 @@ from pathlib import Path
 
 from embodied_silent_failures.artifacts import (
     completion_path,
+    exclusion_path,
     prepare_trial,
     safe_stem,
     write_json_atomic,
@@ -23,13 +24,19 @@ class ArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
             stale = output_dir / "task2--ep4--succ0.csv"
+            temporary = output_dir / ".task2--ep4--succ0.partial.tmp.mp4"
             unrelated = output_dir / "task2--ep5--succ0.csv"
+            similarly_named = output_dir / "task2--ep40--succ0.csv"
             stale.write_text("partial", encoding="utf-8")
+            temporary.write_text("partial", encoding="utf-8")
             unrelated.write_text("keep", encoding="utf-8")
+            similarly_named.write_text("keep", encoding="utf-8")
 
-            self.assertFalse(prepare_trial(output_dir, trial, resume=True))
+            self.assertIsNone(prepare_trial(output_dir, trial, resume=True))
             self.assertFalse(stale.exists())
+            self.assertFalse(temporary.exists())
             self.assertTrue(unrelated.exists())
+            self.assertTrue(similarly_named.exists())
 
     def test_prepare_trial_skips_valid_completion_when_resuming(self) -> None:
         trial = Trial(task_id=1, episode_index=9)
@@ -54,7 +61,26 @@ class ArtifactTests(unittest.TestCase):
                 },
             )
 
-            self.assertTrue(prepare_trial(output_dir, trial, resume=True))
+            self.assertEqual(prepare_trial(output_dir, trial, resume=True), "complete")
+            with self.assertRaises(FileExistsError):
+                prepare_trial(output_dir, trial, resume=False)
+
+    def test_prepare_trial_skips_valid_exclusion_when_resuming(self) -> None:
+        trial = Trial(task_id=3, episode_index=7)
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            marker = exclusion_path(output_dir, trial)
+            write_json_atomic(
+                marker,
+                {
+                    "status": "excluded",
+                    "task_id": 3,
+                    "episode_index": 7,
+                    "reason": "counterfactual_replay_diverged_before_intervention",
+                },
+            )
+
+            self.assertEqual(prepare_trial(output_dir, trial, resume=True), "excluded")
             with self.assertRaises(FileExistsError):
                 prepare_trial(output_dir, trial, resume=False)
 

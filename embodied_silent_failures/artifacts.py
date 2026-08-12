@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from embodied_silent_failures.plan import Trial
@@ -9,6 +9,10 @@ from embodied_silent_failures.plan import Trial
 
 def completion_path(output_dir: Path, trial: Trial) -> Path:
     return output_dir / f"task{trial.task_id}--ep{trial.episode_index}.complete.json"
+
+
+def exclusion_path(output_dir: Path, trial: Trial) -> Path:
+    return output_dir / f"task{trial.task_id}--ep{trial.episode_index}.excluded.json"
 
 
 def safe_stem(trial: Trial, success: bool) -> str:
@@ -29,8 +33,10 @@ def write_json_atomic(path: Path, value: Any) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def prepare_trial(output_dir: Path, trial: Trial, resume: bool) -> bool:
-    """Return True when a completed trial should be skipped."""
+def prepare_trial(
+    output_dir: Path, trial: Trial, resume: bool
+) -> Literal["complete", "excluded"] | None:
+    """Return the terminal state when a trial should be skipped."""
     marker = completion_path(output_dir, trial)
     if marker.exists():
         if not resume:
@@ -61,10 +67,30 @@ def prepare_trial(output_dir: Path, trial: Trial, resume: bool) -> bool:
             raise FileNotFoundError(
                 f"completion marker references missing artifacts {missing}: {marker}"
             )
-        return True
+        if exclusion_path(output_dir, trial).exists():
+            raise ValueError(f"trial has both completion and exclusion markers: {trial}")
+        return "complete"
+
+    marker = exclusion_path(output_dir, trial)
+    if marker.exists():
+        if not resume:
+            raise FileExistsError(
+                f"trial {trial.task_id}/{trial.episode_index} is already excluded; "
+                "pass --resume to skip excluded trials"
+            )
+        with marker.open("r", encoding="utf-8") as file:
+            result = json.load(file)
+        if result.get("status") != "excluded":
+            raise ValueError(f"invalid exclusion marker: {marker}")
+        if result.get("task_id") != trial.task_id:
+            raise ValueError(f"exclusion marker has the wrong task ID: {marker}")
+        if result.get("episode_index") != trial.episode_index:
+            raise ValueError(f"exclusion marker has the wrong episode index: {marker}")
+        return "excluded"
 
     prefix = f"task{trial.task_id}--ep{trial.episode_index}--"
-    for path in output_dir.glob(f"{prefix}*"):
-        if path.is_file():
-            path.unlink()
-    return False
+    for pattern in (f"{prefix}*", f".{prefix}*"):
+        for path in output_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
+    return None

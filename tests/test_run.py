@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 from embodied_silent_failures.run_openvla import (
     Arguments,
+    CounterfactualReplayDivergence,
+    REPLAY_OBSERVATION_TOLERANCE,
     _array_sha256,
     _paired_clean_results,
     _prepare_run,
@@ -50,6 +52,11 @@ class RunTests(unittest.TestCase):
             metadata = {
                 "configuration": {"task": 0},
                 "trial_plan": [{"task_id": 0, "episode_index": 0}],
+                "created_at": "initial",
+                "upstream_revisions": {
+                    "experiment_code": "first-revision",
+                    "experiment_code_dirty": False,
+                },
             }
             args = self.arguments(output_dir)
             _prepare_run(args, metadata)
@@ -58,11 +65,46 @@ class RunTests(unittest.TestCase):
             self.assertEqual(json.loads(run_path.read_text()), metadata)
             _prepare_run(replace(args, resume=True), metadata)
 
+            resumed = {
+                **metadata,
+                "created_at": "later",
+                "upstream_revisions": {
+                    "experiment_code": "second-revision",
+                    "experiment_code_dirty": False,
+                },
+            }
+            (output_dir / "task0--ep0.complete.json").touch()
+            _prepare_run(replace(args, resume=True), resumed)
+            stored = json.loads(run_path.read_text())
+            self.assertEqual(
+                stored["resume_code_revisions"],
+                [
+                    {
+                        "resumed_at": "later",
+                        "experiment_code": "second-revision",
+                        "experiment_code_dirty": False,
+                        "existing_completion_count": 1,
+                        "existing_exclusion_count": 0,
+                    }
+                ],
+            )
+            _prepare_run(replace(args, resume=True), resumed)
+            self.assertEqual(
+                len(json.loads(run_path.read_text())["resume_code_revisions"]), 1
+            )
+
             changed = {**metadata, "trial_plan": []}
             with self.assertRaises(ValueError):
                 _prepare_run(replace(args, resume=True), changed)
             with self.assertRaises(FileExistsError):
                 _prepare_run(args, metadata)
+
+    def test_replay_divergence_preserves_step_error_and_tolerance(self) -> None:
+        error = CounterfactualReplayDivergence(180, 0.0163)
+
+        self.assertEqual(error.policy_step, 180)
+        self.assertEqual(error.error, 0.0163)
+        self.assertIn(f"exceeds {REPLAY_OBSERVATION_TOLERANCE:.3g}", str(error))
 
     def test_initial_state_hash_includes_values_shape_and_dtype(self) -> None:
         class Array:
