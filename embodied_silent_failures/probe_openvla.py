@@ -1,5 +1,7 @@
 import argparse
+import json
 import math
+import pickle
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ from embodied_silent_failures.run_openvla import (
     _load_runtime,
     _model_config,
     _paired_clean_results,
+    _sha256,
 )
 from embodied_silent_failures.score_safe import SAFE_REVISION, _validate_monitor
 
@@ -53,14 +56,16 @@ def _parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--policy-step", type=int, default=50)
     parser.add_argument("--minimum-policy-step", type=int, default=20)
-    parser.add_argument("--shortlist", type=int, default=256)
+    parser.add_argument("--calibration-clean-dir", required=True, type=Path)
+    parser.add_argument("--calibration-split", required=True, type=Path)
+    parser.add_argument("--candidate-batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--wait-steps", type=int, default=10)
     args = parser.parse_args()
     if args.policy_step < 0 or args.minimum_policy_step < 0:
         raise ValueError("policy steps must be non-negative")
-    if args.shortlist < 16:
-        raise ValueError("shortlist must contain at least 16 candidates")
+    if args.candidate_batch_size <= 0:
+        raise ValueError("candidate batch size must be positive")
     return args
 
 
@@ -173,15 +178,67 @@ def _executed_gripper(runtime: Any, clean_action: Any, raw_gripper: float) -> fl
     return float(action[-1])
 
 
+def _load_feature_bounds(
+    torch: Any, clean_dir: Path, split_path: Path
+) -> dict[str, Any]:
+    with split_path.open(encoding="utf-8") as file:
+        split = json.load(file)
+    entries = split.get("splits", {}).get("train")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("calibration split has no training rollouts")
+
+    lower = None
+    upper = None
+    rollout_count = 0
+    step_count = 0
+    for entry in entries:
+        csv_name = entry.get("csv")
+        if not isinstance(csv_name, str):
+            raise ValueError("calibration split entry has no CSV name")
+        path = clean_dir / Path(csv_name).with_suffix(".pkl").name
+        with path.open("rb") as file:
+            payload = pickle.load(file)
+        hidden = torch.as_tensor(payload["hidden_states"])[:, -1, :].float()
+        if hidden.ndim != 2 or hidden.shape[1] != 4096:
+            raise ValueError(f"unexpected calibration feature shape in {path}")
+        if not bool(torch.isfinite(hidden).all()):
+            raise ValueError(f"non-finite calibration feature in {path}")
+        current_lower = hidden.amin(dim=0)
+        current_upper = hidden.amax(dim=0)
+        lower = current_lower if lower is None else torch.minimum(lower, current_lower)
+        upper = current_upper if upper is None else torch.maximum(upper, current_upper)
+        rollout_count += 1
+        step_count += int(hidden.shape[0])
+
+    return {
+        "lower": lower.to("cuda"),
+        "upper": upper.to("cuda"),
+        "global_absolute_maximum": float(
+            torch.maximum(torch.abs(lower), torch.abs(upper)).max().item()
+        ),
+        "rollout_count": rollout_count,
+        "step_count": step_count,
+    }
+
+
+def _candidate_sort_key(record: dict[str, Any]) -> tuple[float, int, int]:
+    return (
+        record["absolute_feature_change"],
+        record["feature_index"],
+        record["bit_index"],
+    )
+
+
 def _candidate_records(
     runtime: Any,
     model: Any,
     monitor: Any,
     generated: Any,
     clean_action: Any,
-    shortlist: int,
+    bounds: dict[str, Any],
+    batch_size: int,
     unnorm_key: str,
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+) -> tuple[dict[str, int], list[dict[str, Any]], dict[str, Any] | None]:
     torch = runtime.torch
     generation_step = 6
     hidden = generated["hidden_states"][generation_step][-1][0, -1, :].detach()
@@ -192,37 +249,46 @@ def _candidate_records(
     if hidden.dtype != torch.bfloat16 or hidden.shape != (4096,):
         raise RuntimeError(f"unexpected monitored feature: {hidden.dtype} {hidden.shape}")
 
-    runner_up = int(torch.topk(logits, 2).indices[1].item())
-    clean_margin = float((logits[token] - logits[runner_up]).item())
-    weight = model.language_model.lm_head.weight.detach()
-    margin_weight = weight[token].float() - weight[runner_up].float()
     hidden_bits = hidden.contiguous().view(torch.int16)
-    per_bit = max(4, math.ceil(shortlist / 16))
-    approximate: list[tuple[float, int, int, float]] = []
+    candidates: list[tuple[int, int, float]] = []
+    global_limit = float(bounds["global_absolute_maximum"])
+    counts = {
+        "native_bit_flips": 4096 * 16,
+        "finite": 0,
+        "within_global_range": 0,
+        "within_coordinate_range": 0,
+        "action_changing_within_coordinate_range": 0,
+    }
 
     for bit_index in range(16):
         changed_bits = torch.bitwise_xor(hidden_bits, _mask(torch, bit_index))
         changed = changed_bits.view(torch.bfloat16)
-        delta = changed.float() - hidden.float()
-        margins = clean_margin + delta * margin_weight
-        margins[~torch.isfinite(changed)] = torch.inf
-        count = min(per_bit, int(torch.isfinite(margins).sum().item()))
-        values, features = torch.topk(margins, count, largest=False)
-        for value, feature in zip(values.tolist(), features.tolist()):
-            approximate.append(
-                (float(value), int(feature), bit_index, float(changed[feature].item()))
+        finite = torch.isfinite(changed)
+        in_global = finite & (torch.abs(changed.float()) <= global_limit)
+        in_coordinate = in_global & (changed.float() >= bounds["lower"]) & (
+            changed.float() <= bounds["upper"]
+        )
+        counts["finite"] += int(finite.sum().item())
+        counts["within_global_range"] += int(in_global.sum().item())
+        counts["within_coordinate_range"] += int(in_coordinate.sum().item())
+        for feature in torch.flatnonzero(in_coordinate).tolist():
+            candidates.append(
+                (
+                    int(feature),
+                    bit_index,
+                    float(changed[feature].item()),
+                )
             )
 
-    approximate.sort(key=lambda item: (item[0], item[1], item[2]))
-    approximate = approximate[:shortlist]
-    faulted = hidden.unsqueeze(0).expand(len(approximate), -1).clone()
-    for row, (_, feature, _, after) in enumerate(approximate):
-        faulted[row, feature] = after
-
+    candidate_tokens: list[int] = []
     with torch.no_grad():
-        candidate_logits = model.language_model.lm_head(faulted)
-        candidate_tokens = torch.argmax(candidate_logits, dim=-1)
-        safe_scores = monitor.projector(faulted.float()).squeeze(-1)
+        for start in range(0, len(candidates), batch_size):
+            chunk = candidates[start : start + batch_size]
+            faulted = hidden.unsqueeze(0).expand(len(chunk), -1).clone()
+            for row, (feature, _, after) in enumerate(chunk):
+                faulted[row, feature] = after
+            changed_logits = model.language_model.lm_head(faulted)
+            candidate_tokens.extend(torch.argmax(changed_logits, dim=-1).tolist())
         clean_safe_score = float(
             monitor.projector(hidden.float().view(1, 1, -1)).item()
         )
@@ -236,10 +302,16 @@ def _candidate_records(
     clean_executed = _executed_gripper(runtime, clean_action, clean_raw_gripper)
     clean_maximum_absolute_feature = float(torch.max(torch.abs(hidden.float())).item())
     records = []
-    for row, (estimated_margin, feature, bit_index, after) in enumerate(approximate):
-        candidate_token = int(candidate_tokens[row].item())
+    for candidate, candidate_token in zip(candidates, candidate_tokens):
+        feature, bit_index, after = candidate
         raw_gripper = _decode_final_action(model, candidate_token, unnorm_key)
         executed = _executed_gripper(runtime, clean_action, raw_gripper)
+        action_changed = executed != clean_executed
+        counts["action_changing_within_coordinate_range"] += int(
+            action_changed
+        )
+        if not action_changed:
+            continue
         before_bits = int(hidden_bits[feature].item()) & 0xFFFF
         after_bits = before_bits ^ (1 << bit_index)
         records.append(
@@ -256,7 +328,10 @@ def _candidate_records(
                 "fault_to_clean_maximum_ratio": (
                     abs(after) / clean_maximum_absolute_feature
                 ),
-                "estimated_runner_up_margin": estimated_margin,
+                "within_calibration_global_range": True,
+                "within_calibration_coordinate_range": True,
+                "calibration_coordinate_lower": float(bounds["lower"][feature].item()),
+                "calibration_coordinate_upper": float(bounds["upper"][feature].item()),
                 "clean_token": token,
                 "fault_token": candidate_token,
                 "token_changed": candidate_token != token,
@@ -265,21 +340,21 @@ def _candidate_records(
                 "raw_gripper_change": raw_gripper - clean_raw_gripper,
                 "clean_executed_gripper": clean_executed,
                 "fault_executed_gripper": executed,
-                "executed_action_changed": executed != clean_executed,
+                "executed_action_changed": action_changed,
                 "clean_safe_raw_score": clean_safe_score,
-                "fault_safe_raw_score": float(safe_scores[row].item()),
             }
         )
 
-    eligible = [record for record in records if record["executed_action_changed"]]
-    eligible.sort(
-        key=lambda record: (
-            record["absolute_feature_change"],
-            record["feature_index"],
-            record["bit_index"],
-        )
-    )
-    return records, eligible[0] if eligible else None
+    records.sort(key=_candidate_sort_key)
+    selected = records[0] if records else None
+    if selected is not None:
+        faulted = hidden.clone()
+        faulted[selected["feature_index"]] = selected["after_value"]
+        with torch.no_grad():
+            selected["fault_safe_raw_score"] = float(
+                monitor.projector(faulted.float().view(1, 1, -1)).item()
+            )
+    return counts, records, selected
 
 
 def _verify_selected_fault(
@@ -344,6 +419,9 @@ def main() -> None:
     plan, clean_results = _paired_clean_results(args.paired_clean_dirs, plan)
     runtime = _load_runtime(args.openvla_root, args.libero_root)
     monitor = _load_safe_monitor(args.safe_root, args.monitor_dir, runtime.torch)
+    bounds = _load_feature_bounds(
+        runtime.torch, args.calibration_clean_dir, args.calibration_split
+    )
     model_config = _model_config(
         SimpleNamespace(checkpoint=args.checkpoint, task_suite=args.task_suite)
     )
@@ -422,13 +500,14 @@ def main() -> None:
                         processor=processor,
                         n_samples=1,
                     )
-                candidates, selected = _candidate_records(
+                counts, candidates, selected = _candidate_records(
                     runtime,
                     model,
                     monitor,
                     generated,
                     clean_action,
-                    args.shortlist,
+                    bounds,
+                    args.candidate_batch_size,
                     model_config.unnorm_key,
                 )
                 record = {
@@ -438,15 +517,12 @@ def main() -> None:
                     "policy_step": step,
                     "timing": args.timing,
                     "status": (
-                        "selected" if selected is not None else "no_effective_candidate"
+                        "selected" if selected is not None else "no_in_range_candidate"
                     ),
                     "replay_maximum_numeric_observation_error": replay_error,
-                    "candidate_count": len(candidates),
-                    "action_changing_candidate_count": sum(
-                        item["executed_action_changed"] for item in candidates
-                    ),
+                    "candidate_counts": counts,
+                    "action_changing_candidates": candidates,
                     "selected": selected,
-                    "candidates": candidates,
                 }
                 if selected is not None:
                     spec = FaultSpec(
@@ -479,14 +555,12 @@ def main() -> None:
                 records.append(record)
                 print(
                     f"probed task {trial.task_id}, episode {trial.episode_index}, "
-                    f"step {step}: {record['action_changing_candidate_count']} "
-                    "action-changing candidates"
+                    f"step {step}: {counts['action_changing_within_coordinate_range']} "
+                    "in-range action-changing candidates"
                 )
         finally:
             env.close()
 
-    if not selected_entries:
-        raise RuntimeError("probe found no faults that change the executed action")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_json_atomic(
         args.output_dir / "probe.json",
@@ -494,11 +568,26 @@ def main() -> None:
             "schema_version": 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "selection_basis": (
-                "smallest_finite_feature_change_that_changes_executed_action_"
-                "without_safe_score"
+                "smallest_coordinate_calibrated_feature_change_that_changes_"
+                "executed_action_without_safe_score"
             ),
             "timing": args.timing,
-            "shortlist": args.shortlist,
+            "candidate_search": (
+                "all_4096_features_times_16_native_bfloat16_bits_with_exact_"
+                "model_head_evaluation_after_coordinate_range_gate"
+            ),
+            "candidate_batch_size": args.candidate_batch_size,
+            "calibration": {
+                "clean_directory": str(args.calibration_clean_dir.resolve()),
+                "split_manifest": str(args.calibration_split.resolve()),
+                "split_manifest_sha256": _sha256(args.calibration_split),
+                "split": "train",
+                "rollout_count": bounds["rollout_count"],
+                "step_count": bounds["step_count"],
+                "global_absolute_maximum": bounds["global_absolute_maximum"],
+                "range": "per_feature_observed_minimum_and_maximum",
+            },
+            "selected_trial_count": len(selected_entries),
             "records": records,
         },
     )
@@ -507,8 +596,8 @@ def main() -> None:
         {
             "schema_version": 1,
             "selection_basis": (
-                "smallest_finite_feature_change_that_changes_executed_action_"
-                "without_safe_score"
+                "smallest_coordinate_calibrated_feature_change_that_changes_"
+                "executed_action_without_safe_score"
             ),
             "trials": selected_entries,
         },
