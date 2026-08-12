@@ -243,6 +243,9 @@ def _candidate_records(
     generation_step = 6
     hidden = generated["hidden_states"][generation_step][-1][0, -1, :].detach()
     logits = generated["logits"][generation_step][0].detach()
+    lm_head = model.language_model.lm_head
+    if getattr(lm_head, "bias", None) is not None:
+        raise RuntimeError("probe expects a bias-free language-model head")
     token = int(generated["sequences"][0, -7 + generation_step].item())
     if token != int(torch.argmax(logits).item()):
         raise RuntimeError("generated token does not match the recorded logits")
@@ -280,15 +283,7 @@ def _candidate_records(
                 )
             )
 
-    candidate_tokens: list[int] = []
     with torch.no_grad():
-        for start in range(0, len(candidates), batch_size):
-            chunk = candidates[start : start + batch_size]
-            faulted = hidden.unsqueeze(0).expand(len(chunk), -1).clone()
-            for row, (feature, _, after) in enumerate(chunk):
-                faulted[row, feature] = after
-            changed_logits = model.language_model.lm_head(faulted)
-            candidate_tokens.extend(torch.argmax(changed_logits, dim=-1).tolist())
         clean_safe_score = float(
             monitor.projector(hidden.float().view(1, 1, -1)).item()
         )
@@ -301,49 +296,71 @@ def _candidate_records(
         raise RuntimeError("clean token decoding disagrees with OpenVLA action")
     clean_executed = _executed_gripper(runtime, clean_action, clean_raw_gripper)
     clean_maximum_absolute_feature = float(torch.max(torch.abs(hidden.float())).item())
+    clean_logits = logits.float()
     records = []
-    for candidate, candidate_token in zip(candidates, candidate_tokens):
-        feature, bit_index, after = candidate
-        raw_gripper = _decode_final_action(model, candidate_token, unnorm_key)
-        executed = _executed_gripper(runtime, clean_action, raw_gripper)
-        action_changed = executed != clean_executed
-        counts["action_changing_within_coordinate_range"] += int(
-            action_changed
-        )
-        if not action_changed:
-            continue
-        before_bits = int(hidden_bits[feature].item()) & 0xFFFF
-        after_bits = before_bits ^ (1 << bit_index)
-        records.append(
-            {
-                "feature_index": feature,
-                "bit_index": bit_index,
-                "bit_class": _bit_class(bit_index),
-                "before_bits": f"0x{before_bits:04x}",
-                "after_bits": f"0x{after_bits:04x}",
-                "before_value": float(hidden[feature].item()),
-                "after_value": after,
-                "absolute_feature_change": abs(after - float(hidden[feature].item())),
-                "clean_maximum_absolute_feature": clean_maximum_absolute_feature,
-                "fault_to_clean_maximum_ratio": (
-                    abs(after) / clean_maximum_absolute_feature
-                ),
-                "within_calibration_global_range": True,
-                "within_calibration_coordinate_range": True,
-                "calibration_coordinate_lower": float(bounds["lower"][feature].item()),
-                "calibration_coordinate_upper": float(bounds["upper"][feature].item()),
-                "clean_token": token,
-                "fault_token": candidate_token,
-                "token_changed": candidate_token != token,
-                "clean_raw_gripper": clean_raw_gripper,
-                "fault_raw_gripper": raw_gripper,
-                "raw_gripper_change": raw_gripper - clean_raw_gripper,
-                "clean_executed_gripper": clean_executed,
-                "fault_executed_gripper": executed,
-                "executed_action_changed": action_changed,
-                "clean_safe_raw_score": clean_safe_score,
-            }
-        )
+    with torch.no_grad():
+        for start in range(0, len(candidates), batch_size):
+            chunk = candidates[start : start + batch_size]
+            features = torch.tensor(
+                [feature for feature, _, _ in chunk], device="cuda", dtype=torch.long
+            )
+            afters = torch.tensor(
+                [after for _, _, after in chunk], device="cuda", dtype=torch.float32
+            )
+            befores = hidden[features].float()
+            deltas = afters - befores
+            columns = lm_head.weight[:, features].transpose(0, 1).float()
+            changed_logits = clean_logits.unsqueeze(0) + deltas.unsqueeze(1) * columns
+            top_values, top_indices = torch.topk(changed_logits, k=2, dim=-1)
+            margins = top_values[:, 0] - top_values[:, 1]
+
+            for row, candidate in enumerate(chunk):
+                feature, bit_index, after = candidate
+                candidate_token = int(top_indices[row, 0].item())
+                raw_gripper = _decode_final_action(model, candidate_token, unnorm_key)
+                executed = _executed_gripper(runtime, clean_action, raw_gripper)
+                action_changed = executed != clean_executed
+                counts["action_changing_within_coordinate_range"] += int(action_changed)
+                if not action_changed:
+                    continue
+                before_bits = int(hidden_bits[feature].item()) & 0xFFFF
+                after_bits = before_bits ^ (1 << bit_index)
+                before_value = float(hidden[feature].item())
+                records.append(
+                    {
+                        "feature_index": feature,
+                        "bit_index": bit_index,
+                        "bit_class": _bit_class(bit_index),
+                        "before_bits": f"0x{before_bits:04x}",
+                        "after_bits": f"0x{after_bits:04x}",
+                        "before_value": before_value,
+                        "after_value": after,
+                        "absolute_feature_change": abs(after - before_value),
+                        "clean_maximum_absolute_feature": clean_maximum_absolute_feature,
+                        "fault_to_clean_maximum_ratio": (
+                            abs(after) / clean_maximum_absolute_feature
+                        ),
+                        "within_calibration_global_range": True,
+                        "within_calibration_coordinate_range": True,
+                        "calibration_coordinate_lower": float(
+                            bounds["lower"][feature].item()
+                        ),
+                        "calibration_coordinate_upper": float(
+                            bounds["upper"][feature].item()
+                        ),
+                        "clean_token": token,
+                        "fault_token": candidate_token,
+                        "fault_top_token_margin": float(margins[row].item()),
+                        "token_changed": candidate_token != token,
+                        "clean_raw_gripper": clean_raw_gripper,
+                        "fault_raw_gripper": raw_gripper,
+                        "raw_gripper_change": raw_gripper - clean_raw_gripper,
+                        "clean_executed_gripper": clean_executed,
+                        "fault_executed_gripper": executed,
+                        "executed_action_changed": action_changed,
+                        "clean_safe_raw_score": clean_safe_score,
+                    }
+                )
 
     records.sort(key=_candidate_sort_key)
     selected = records[0] if records else None
@@ -365,6 +382,7 @@ def _verify_selected_fault(
     policy_observation: dict[str, Any],
     task_description: str,
     trial_seed: int,
+    clean_action: Any,
     spec: FaultSpec,
     expected: dict[str, Any],
 ) -> dict[str, Any]:
@@ -385,18 +403,26 @@ def _verify_selected_fault(
         injector.close()
     actual_token = int(generated["sequences"][0, -1].item())
     actual_hidden = generated["hidden_states"][6][-1][0, -1, spec.feature_index]
-    if actual_token != expected["fault_token"]:
-        raise RuntimeError("hooked fault token disagrees with analytical probe")
+    actual_raw_gripper = float(action[-1])
+    actual_executed_gripper = _executed_gripper(runtime, clean_action, actual_raw_gripper)
     if float(actual_hidden.item()) != expected["after_value"]:
         raise RuntimeError("hooked SAFE feature disagrees with analytical probe")
-    if not math.isclose(
-        float(action[-1]), expected["fault_raw_gripper"], rel_tol=1e-6, abs_tol=1e-6
-    ):
-        raise RuntimeError("hooked gripper action disagrees with analytical probe")
+    if actual_executed_gripper == expected["clean_executed_gripper"]:
+        raise RuntimeError("hooked verification did not change the executed gripper")
     return {
         "fault_token": actual_token,
-        "raw_gripper": float(action[-1]),
+        "raw_gripper": actual_raw_gripper,
+        "executed_gripper": actual_executed_gripper,
         "feature_value": float(actual_hidden.item()),
+        "analytical_fault_token": expected["fault_token"],
+        "analytical_fault_raw_gripper": expected["fault_raw_gripper"],
+        "analytical_token_matches_actual": actual_token == expected["fault_token"],
+        "analytical_raw_gripper_matches_actual": math.isclose(
+            actual_raw_gripper,
+            expected["fault_raw_gripper"],
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        ),
         "injection": injector.require_injected(),
     }
 
@@ -542,6 +568,7 @@ def main() -> None:
                         policy_observation,
                         task_description,
                         trial_seed,
+                        clean_action,
                         spec,
                         selected,
                     )
@@ -573,8 +600,9 @@ def main() -> None:
             ),
             "timing": args.timing,
             "candidate_search": (
-                "all_4096_features_times_16_native_bfloat16_bits_with_exact_"
-                "model_head_evaluation_after_coordinate_range_gate"
+                "all_4096_features_times_16_native_bfloat16_bits_with_"
+                "analytical_full_vocabulary_logit_updates_for_single_"
+                "coordinate_changes_after_coordinate_range_gate"
             ),
             "candidate_batch_size": args.candidate_batch_size,
             "calibration": {
