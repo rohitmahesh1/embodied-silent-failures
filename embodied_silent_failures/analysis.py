@@ -9,6 +9,7 @@ FALSE_ALARM = "false_alarm"
 DETECTED_FAULT_FAILURE = "detected_fault_failure"
 SILENT_FAULT_FAILURE = "silent_fault_failure"
 BASELINE_FAILURE = "baseline_failure"
+TREATMENT_CONDITIONS = frozenset({"activation_fault", "stale_image"})
 
 
 @dataclass(frozen=True)
@@ -83,8 +84,8 @@ def classify_pair(
             raise ValueError(f"paired results disagree on {key}")
     if clean_result.get("condition") != "clean":
         raise ValueError("the paired reference is not a clean rollout")
-    if fault_result.get("condition") != "activation_fault":
-        raise ValueError("the paired treatment is not an activation-fault rollout")
+    if fault_result.get("condition") not in TREATMENT_CONDITIONS:
+        raise ValueError("the paired treatment is not a supported intervention rollout")
 
     fault = fault_result.get("fault")
     if not isinstance(fault, dict):

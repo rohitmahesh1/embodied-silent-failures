@@ -33,6 +33,7 @@ class RunTests(unittest.TestCase):
             resume=resume,
             fault_site=None,
             fault_manifest=None,
+            stale_image_manifest=None,
             fault_layer=None,
             fault_policy_step=None,
             fault_generation_step=0,

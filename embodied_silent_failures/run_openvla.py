@@ -43,6 +43,10 @@ from embodied_silent_failures.replay import (
     observation_error,
     replay_action,
 )
+from embodied_silent_failures.stale_image_manifest import (
+    StaleImageSpec,
+    load_stale_image_manifest,
+)
 
 
 OPENVLA_REVISION = "300dce26d44f407c725695d16cd445755c92cbd1"
@@ -92,6 +96,7 @@ class Arguments:
     resume: bool
     fault_site: str | None
     fault_manifest: Path | None
+    stale_image_manifest: Path | None
     fault_layer: int | None
     fault_policy_step: int | None
     fault_generation_step: int
@@ -146,6 +151,7 @@ def _parse_arguments() -> Arguments:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--fault-site", choices=FAULT_SITES)
     parser.add_argument("--fault-manifest", type=Path)
+    parser.add_argument("--stale-image-manifest", type=Path)
     parser.add_argument("--fault-layer", type=int)
     parser.add_argument("--fault-policy-step", type=int)
     parser.add_argument("--fault-generation-step", type=int, default=0)
@@ -165,6 +171,21 @@ def _parse_arguments() -> Arguments:
 
 
 def _fault_spec(args: Arguments) -> FaultSpec | None:
+    if args.stale_image_manifest is not None:
+        static_values = (
+            args.fault_site,
+            args.fault_layer,
+            args.fault_policy_step,
+            args.fault_bit_index,
+            args.fault_feature_index,
+        )
+        if args.fault_manifest is not None or any(
+            value is not None for value in static_values
+        ):
+            raise ValueError(
+                "--stale-image-manifest cannot be combined with activation-fault options"
+            )
+        return None
     if args.fault_manifest is not None:
         static_values = (
             args.fault_site,
@@ -187,7 +208,7 @@ def _fault_spec(args: Arguments) -> FaultSpec | None:
             )
         ):
             raise ValueError("fault options require --fault-site")
-        if args.paired_clean_dirs:
+        if args.paired_clean_dirs and args.stale_image_manifest is None:
             raise ValueError("--paired-clean-dir requires --fault-site")
         return None
     if args.fault_policy_step is None:
@@ -219,12 +240,18 @@ def _git_revision(path: Path) -> str:
 def _validate_inputs(args: Arguments) -> None:
     fault_spec = _fault_spec(args)
     has_fault = fault_spec is not None or args.fault_manifest is not None
-    if args.replay_clean_prefix and not has_fault:
-        raise ValueError("--replay-clean-prefix requires a fault")
-    if has_fault and not args.paired_clean_dirs:
-        raise ValueError("fault experiments require at least one --paired-clean-dir")
+    has_stale_image = args.stale_image_manifest is not None
+    has_intervention = has_fault or has_stale_image
+    if args.replay_clean_prefix and not has_intervention:
+        raise ValueError("--replay-clean-prefix requires an intervention")
+    if has_intervention and not args.paired_clean_dirs:
+        raise ValueError("intervention experiments require at least one --paired-clean-dir")
     if args.fault_manifest is not None and not args.fault_manifest.is_file():
         raise FileNotFoundError(f"fault manifest is not a file: {args.fault_manifest}")
+    if args.stale_image_manifest is not None and not args.stale_image_manifest.is_file():
+        raise FileNotFoundError(
+            f"stale-image manifest is not a file: {args.stale_image_manifest}"
+        )
     for name, path in {
         "checkpoint": args.checkpoint,
         "OpenVLA root": args.openvla_root,
@@ -399,6 +426,7 @@ def _run_metadata(
     args: Arguments,
     runtime: Runtime,
     plan: list[Trial],
+    condition: str,
     fault_model: dict[str, Any] | None,
 ) -> dict[str, Any]:
     package_versions = {
@@ -421,6 +449,9 @@ def _run_metadata(
     config["fault_manifest"] = (
         str(args.fault_manifest.resolve()) if args.fault_manifest else None
     )
+    config["stale_image_manifest"] = (
+        str(args.stale_image_manifest.resolve()) if args.stale_image_manifest else None
+    )
     config["paired_clean_dirs"] = [
         str(path.resolve()) for path in args.paired_clean_dirs
     ]
@@ -429,7 +460,7 @@ def _run_metadata(
     project_root = Path(__file__).resolve().parents[1]
     return {
         "schema_version": 1,
-        "condition": "activation_fault" if fault_model else "clean",
+        "condition": condition,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "configuration": config,
         "trial_count": len(plan),
@@ -456,6 +487,9 @@ def _run_metadata(
         ),
         "fault_manifest_sha256": (
             _sha256(args.fault_manifest) if args.fault_manifest else None
+        ),
+        "stale_image_manifest_sha256": (
+            _sha256(args.stale_image_manifest) if args.stale_image_manifest else None
         ),
         "machine": {
             "hostname": socket.gethostname(),
@@ -615,8 +649,10 @@ def _run_trial(
     initial_state: Any,
     trial_seed: int,
     initial_state_sha256: str,
+    run_condition: str,
     fault_injector: TransientActivationFault | None,
     clean_trace: CleanTrace | None,
+    stale_image_spec: StaleImageSpec | None,
 ) -> dict[str, Any]:
     runtime.torch.cuda.reset_peak_memory_stats()
     rollout_started = time.perf_counter()
@@ -628,6 +664,7 @@ def _run_trial(
     resize_size = runtime.get_image_resize_size(model_config)
     hidden_history = []
     observation_history: list[dict[str, Any]] = []
+    policy_images = []
     replay_images = []
     rows: list[dict[str, Any]] = []
     inference_seconds: list[float] = []
@@ -637,9 +674,15 @@ def _run_trial(
     replayed_steps = 0
     if fault_injector is not None:
         fault_injector.begin_trial(trial_seed)
+    intervention_step = None
+    if fault_injector is not None:
+        intervention_step = fault_injector.spec.policy_step
+    elif stale_image_spec is not None:
+        intervention_step = stale_image_spec.policy_step
+    stale_record = None
 
     for policy_step in range(MAX_STEPS[args.task_suite]):
-        if clean_trace is not None and policy_step <= fault_injector.spec.policy_step:
+        if clean_trace is not None and intervention_step is not None and policy_step <= intervention_step:
             error = observation_error(
                 runtime.np, clean_trace, observation, policy_step
             )
@@ -651,10 +694,11 @@ def _run_trial(
                     f"{REPLAY_OBSERVATION_TOLERANCE:.3g}"
                 )
 
-        if clean_trace is not None and policy_step < fault_injector.spec.policy_step:
+        if clean_trace is not None and intervention_step is not None and policy_step < intervention_step:
+            image = runtime.get_libero_image(observation, resize_size)
+            policy_images.append(image.copy())
             if args.save_video:
-                resize_size = runtime.get_image_resize_size(model_config)
-                replay_images.append(runtime.get_libero_image(observation, resize_size))
+                replay_images.append(image)
             hidden_history.append(
                 runtime.torch.as_tensor(clean_trace.hidden_states[policy_step])
                 .detach()
@@ -682,6 +726,22 @@ def _run_trial(
             continue
 
         image = runtime.get_libero_image(observation, resize_size)
+        policy_image = image
+        if stale_image_spec is not None and policy_step == stale_image_spec.policy_step:
+            if stale_image_spec.source_policy_step != (
+                stale_image_spec.policy_step - stale_image_spec.image_lag
+            ):
+                raise RuntimeError("stale-image source policy step does not match the lag")
+            if stale_image_spec.source_policy_step >= len(policy_images):
+                raise RuntimeError(
+                    f"stale-image source step {stale_image_spec.source_policy_step} "
+                    f"is unavailable at policy step {policy_step}"
+                )
+            policy_image = policy_images[stale_image_spec.source_policy_step].copy()
+            stale_record = {
+                **stale_image_spec.to_dict(),
+                "trial_seed": trial_seed,
+            }
         state = runtime.np.concatenate(
             (
                 observation["robot0_eef_pos"],
@@ -689,7 +749,7 @@ def _run_trial(
                 observation["robot0_gripper_qpos"],
             )
         )
-        policy_observation = {"full_image": image, "state": state}
+        policy_observation = {"full_image": policy_image, "state": state}
 
         runtime.torch.cuda.synchronize()
         inference_started = time.perf_counter()
@@ -718,6 +778,7 @@ def _run_trial(
 
         hidden_history.append(_extract_hidden_states(runtime, generated))
         observation_history.append(_numeric_observation(runtime, observation))
+        policy_images.append(image.copy())
         if args.save_video:
             replay_images.append(image)
 
@@ -749,6 +810,8 @@ def _run_trial(
             row["fault/injected"] = bool(
                 record is not None and record["policy_step"] == policy_step
             )
+        elif stale_image_spec is not None:
+            row["fault/injected"] = policy_step == stale_image_spec.policy_step
 
         simulator_started = time.perf_counter()
         observation, reward, done, _ = env.step(action.tolist())
@@ -763,10 +826,14 @@ def _run_trial(
             break
 
     rollout_seconds = time.perf_counter() - rollout_started
-    fault_record = (
-        fault_injector.require_injected() if fault_injector is not None else None
-    )
-    condition = "activation_fault" if fault_record else "clean"
+    fault_record = None
+    if fault_injector is not None:
+        fault_record = fault_injector.require_injected()
+    elif stale_image_spec is not None:
+        if stale_record is None:
+            raise RuntimeError("stale-image intervention was never applied")
+        fault_record = stale_record
+    condition = run_condition if fault_record else "clean"
 
     stem = safe_stem(trial, success)
     csv_path = args.output_dir / f"{stem}.csv"
@@ -851,12 +918,21 @@ def main() -> None:
     _validate_inputs(args)
 
     manifest = None
+    stale_manifest = None
     if args.fault_manifest is not None:
         if args.trial_manifest is not None:
             raise ValueError("--fault-manifest already defines the trial plan")
         manifest = load_fault_manifest(args.fault_manifest)
         fault_specs = manifest.specs
         plan = sorted(fault_specs)
+        stale_specs = {}
+    elif args.stale_image_manifest is not None:
+        if args.trial_manifest is not None:
+            raise ValueError("--stale-image-manifest already defines the trial plan")
+        stale_manifest = load_stale_image_manifest(args.stale_image_manifest)
+        stale_specs = stale_manifest.specs
+        fault_specs = {}
+        plan = sorted(stale_specs)
     elif args.trial_manifest is None:
         task_ids = parse_task_ids(args.task_ids)
         plan = build_trial_plan(
@@ -870,19 +946,22 @@ def main() -> None:
     task_ids = sorted({trial.task_id for trial in plan})
     if static_fault_spec is not None:
         fault_specs = {trial: static_fault_spec for trial in plan}
-    elif manifest is None:
+        stale_specs = {}
+    elif manifest is None and stale_manifest is None:
         fault_specs = {}
+        stale_specs = {}
 
     paired_clean: dict[Trial, dict[str, Any]] = {}
-    if fault_specs:
+    if fault_specs or stale_specs:
         requested_count = len(plan)
         plan, paired_clean = _paired_clean_results(args.paired_clean_dirs, plan)
-        too_short = [
-            trial
-            for trial in plan
-            if int(paired_clean[trial]["policy_steps"])
-            <= fault_specs[trial].policy_step
-        ]
+        too_short = []
+        for trial in plan:
+            clean_steps = int(paired_clean[trial]["policy_steps"])
+            if trial in fault_specs and clean_steps <= fault_specs[trial].policy_step:
+                too_short.append(trial)
+            if trial in stale_specs and clean_steps <= stale_specs[trial].policy_step:
+                too_short.append(trial)
         if too_short:
             preview = ", ".join(
                 f"{trial.task_id}/{trial.episode_index}" for trial in too_short[:5]
@@ -900,13 +979,23 @@ def main() -> None:
             "selection_basis": manifest.selection_basis,
             "trial_count": len(plan),
         }
+        run_condition = "activation_fault"
+    elif stale_manifest is not None:
+        fault_model = {
+            "kind": "per_trial_stale_image_manifest",
+            "selection_basis": stale_manifest.selection_basis,
+            "trial_count": len(plan),
+        }
+        run_condition = "stale_image"
     elif static_fault_spec is not None:
         fault_model = static_fault_spec.to_dict()
+        run_condition = "activation_fault"
     else:
         fault_model = None
+        run_condition = "clean"
 
     runtime = _load_runtime(args.openvla_root, args.libero_root)
-    metadata = _run_metadata(args, runtime, plan, fault_model)
+    metadata = _run_metadata(args, runtime, plan, run_condition, fault_model)
     _prepare_run(args, metadata)
 
     benchmark_class = runtime.benchmark.get_benchmark_dict()[args.task_suite]
@@ -974,7 +1063,8 @@ def main() -> None:
                 initial_state_sha256 = _array_sha256(runtime, initial_state)
                 clean_trace = None
                 trial_fault_spec = fault_specs.get(trial)
-                if trial_fault_spec is not None:
+                trial_stale_image_spec = stale_specs.get(trial)
+                if trial_fault_spec is not None or trial_stale_image_spec is not None:
                     clean_result = paired_clean[trial]
                     if clean_result.get("initial_state_sha256") != initial_state_sha256:
                         raise ValueError(
@@ -986,7 +1076,7 @@ def main() -> None:
                             f"paired clean seed does not match task {trial.task_id}, "
                             f"episode {trial.episode_index}"
                         )
-                    if args.replay_clean_prefix:
+                    if args.replay_clean_prefix or trial_stale_image_spec is not None:
                         clean_trace = load_clean_trace(clean_result)
                 print(
                     f"[{index}/{len(plan)}] running task {trial.task_id}, "
@@ -1011,8 +1101,10 @@ def main() -> None:
                         initial_state,
                         trial_seed,
                         initial_state_sha256,
+                        run_condition,
                         fault_injector,
                         clean_trace,
+                        trial_stale_image_spec,
                     )
                 finally:
                     if fault_injector is not None:

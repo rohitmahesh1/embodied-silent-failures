@@ -7,6 +7,7 @@ from embodied_silent_failures.analysis import (
     PRESERVED_SUCCESS,
     SILENT_FAULT_FAILURE,
     Alarm,
+    TREATMENT_CONDITIONS,
     alarm_from_score_band,
     alarm_from_scores,
     classify_pair,
@@ -32,7 +33,7 @@ class AnalysisTests(unittest.TestCase):
             "trial_seed": 17 + episode_index,
             "success": success,
         }
-        if condition == "activation_fault":
+        if condition in TREATMENT_CONDITIONS:
             value["fault"] = {
                 "trial_seed": value["trial_seed"],
                 "bit_class": bit_class,
@@ -146,6 +147,15 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(set(grouped), {"exponent", "mantissa"})
         self.assertEqual(grouped["mantissa"]["residual_silent_risk"]["estimate"], 1)
         self.assertEqual(grouped["exponent"]["residual_silent_risk"]["estimate"], 0)
+
+    def test_pair_accepts_stale_image_as_a_supported_treatment(self) -> None:
+        outcome = classify_pair(
+            self.result("clean", True),
+            self.result("stale_image", False),
+            Alarm(False, None),
+        )
+
+        self.assertEqual(outcome.category, SILENT_FAULT_FAILURE)
 
 
 if __name__ == "__main__":

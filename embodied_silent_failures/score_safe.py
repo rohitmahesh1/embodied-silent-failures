@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from embodied_silent_failures.analysis import Alarm
+from embodied_silent_failures.analysis import Alarm, TREATMENT_CONDITIONS
 from embodied_silent_failures.artifacts import write_json_atomic
 
 
@@ -67,8 +67,8 @@ def _completion_results(run_dir: Path) -> dict[tuple[int, int], dict[str, Any]]:
         result = _load_json(path)
         if result.get("status") != "complete":
             raise ValueError(f"fault result is not complete: {path}")
-        if result.get("condition") != "activation_fault":
-            raise ValueError(f"result is not an activation-fault rollout: {path}")
+        if result.get("condition") not in TREATMENT_CONDITIONS:
+            raise ValueError(f"result is not a supported intervention rollout: {path}")
         key = (int(result["task_id"]), int(result["episode_index"]))
         if key in results:
             raise ValueError(f"duplicate completion result for {key} in {run_dir}")
@@ -204,8 +204,10 @@ def main() -> None:
         if not run_dir.is_dir():
             raise FileNotFoundError(f"fault run directory does not exist: {run_dir}")
         run = _load_json(run_dir / "run.json")
-        if run.get("condition") != "activation_fault":
-            raise ValueError(f"run metadata is not for activation faults: {run_dir}")
+        if run.get("condition") not in TREATMENT_CONDITIONS:
+            raise ValueError(
+                f"run metadata is not for a supported intervention: {run_dir}"
+            )
         completions = _completion_results(run_dir)
 
         cfg.dataset.data_path = f"{run_dir.resolve()}/"
@@ -270,6 +272,7 @@ def main() -> None:
                 "run": label,
                 "task_id": int(rollout.task_id),
                 "episode_index": int(rollout.episode_idx),
+                "condition": str(completion["condition"]),
                 "success": bool(completion["success"]),
                 "length": len(values),
                 "fault": fault,
