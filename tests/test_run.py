@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from embodied_silent_failures.run_openvla import (
     Arguments,
     CounterfactualReplayDivergence,
+    CounterfactualReplayTerminated,
     REPLAY_OBSERVATION_TOLERANCE,
     _array_sha256,
     _paired_clean_results,
@@ -105,6 +106,15 @@ class RunTests(unittest.TestCase):
         self.assertEqual(error.policy_step, 180)
         self.assertEqual(error.error, 0.0163)
         self.assertIn(f"exceeds {REPLAY_OBSERVATION_TOLERANCE:.3g}", str(error))
+
+    def test_early_replay_termination_preserves_both_steps(self) -> None:
+        error = CounterfactualReplayTerminated(52, 198)
+
+        self.assertEqual(error.policy_step, 52)
+        self.assertEqual(error.intervention_step, 198)
+        self.assertEqual(
+            error.reason, "counterfactual_replay_terminated_before_intervention"
+        )
 
     def test_initial_state_hash_includes_values_shape_and_dtype(self) -> None:
         class Array:

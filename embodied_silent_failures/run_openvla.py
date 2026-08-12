@@ -57,7 +57,13 @@ CONTAINER_IMAGE = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"
 REPLAY_OBSERVATION_TOLERANCE = 1e-6
 
 
-class CounterfactualReplayDivergence(RuntimeError):
+class CounterfactualReplayInvalid(RuntimeError):
+    reason: str
+
+
+class CounterfactualReplayDivergence(CounterfactualReplayInvalid):
+    reason = "counterfactual_replay_diverged_before_intervention"
+
     def __init__(self, policy_step: int, error: float):
         self.policy_step = policy_step
         self.error = error
@@ -65,6 +71,18 @@ class CounterfactualReplayDivergence(RuntimeError):
             f"counterfactual replay diverged at step {policy_step}: "
             f"maximum numeric observation error {error:.3g} exceeds "
             f"{REPLAY_OBSERVATION_TOLERANCE:.3g}"
+        )
+
+
+class CounterfactualReplayTerminated(CounterfactualReplayInvalid):
+    reason = "counterfactual_replay_terminated_before_intervention"
+
+    def __init__(self, policy_step: int, intervention_step: int):
+        self.policy_step = policy_step
+        self.intervention_step = intervention_step
+        super().__init__(
+            f"counterfactual replay terminated after step {policy_step}, "
+            f"before intervention step {intervention_step}"
         )
 
 
@@ -753,9 +771,8 @@ def _run_trial(
             rows.append(row)
             replayed_steps += 1
             if done:
-                raise RuntimeError(
-                    f"clean-prefix replay terminated before fault step "
-                    f"{fault_injector.spec.policy_step}"
+                raise CounterfactualReplayTerminated(
+                    policy_step, intervention_step
                 )
             continue
 
@@ -1143,7 +1160,7 @@ def main() -> None:
                             clean_trace,
                             trial_stale_image_spec,
                         )
-                    except CounterfactualReplayDivergence as error:
+                    except CounterfactualReplayInvalid as error:
                         intervention_step = (
                             trial_fault_spec.policy_step
                             if trial_fault_spec is not None
@@ -1154,7 +1171,7 @@ def main() -> None:
                             {
                                 "schema_version": 1,
                                 "status": "excluded",
-                                "reason": "counterfactual_replay_diverged_before_intervention",
+                                "reason": error.reason,
                                 "condition": run_condition,
                                 "task_suite_name": args.task_suite,
                                 "task_id": trial.task_id,
@@ -1162,8 +1179,10 @@ def main() -> None:
                                 "trial_seed": trial_seed,
                                 "initial_state_sha256": initial_state_sha256,
                                 "intervention_policy_step": intervention_step,
-                                "divergence_policy_step": error.policy_step,
-                                "maximum_numeric_observation_error": error.error,
+                                "last_replay_policy_step": error.policy_step,
+                                "maximum_numeric_observation_error": getattr(
+                                    error, "error", None
+                                ),
                                 "observation_tolerance": REPLAY_OBSERVATION_TOLERANCE,
                                 "clean_source_directory": str(clean_trace.source_dir),
                             },
