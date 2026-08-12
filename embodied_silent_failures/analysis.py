@@ -9,7 +9,9 @@ FALSE_ALARM = "false_alarm"
 DETECTED_FAULT_FAILURE = "detected_fault_failure"
 SILENT_FAULT_FAILURE = "silent_fault_failure"
 BASELINE_FAILURE = "baseline_failure"
-TREATMENT_CONDITIONS = frozenset({"activation_fault", "stale_image"})
+TREATMENT_CONDITIONS = frozenset(
+    {"activation_fault", "current_image_control", "stale_image"}
+)
 
 
 @dataclass(frozen=True)

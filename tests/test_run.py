@@ -10,6 +10,7 @@ from embodied_silent_failures.run_openvla import (
     CounterfactualReplayDivergence,
     CounterfactualReplayTerminated,
     REPLAY_OBSERVATION_TOLERANCE,
+    _image_intervention_record,
     _array_sha256,
     _paired_clean_results,
     _prepare_run,
@@ -37,6 +38,7 @@ class RunTests(unittest.TestCase):
             fault_site=None,
             fault_manifest=None,
             stale_image_manifest=None,
+            image_input_mode="stale",
             fault_layer=None,
             fault_policy_step=None,
             fault_generation_step=0,
@@ -114,6 +116,27 @@ class RunTests(unittest.TestCase):
         self.assertEqual(error.intervention_step, 198)
         self.assertEqual(
             error.reason, "counterfactual_replay_terminated_before_intervention"
+        )
+
+    def test_current_image_control_records_matched_stale_intervention(self) -> None:
+        from embodied_silent_failures.stale_image_manifest import StaleImageSpec
+
+        record = _image_intervention_record(
+            StaleImageSpec(policy_step=80, image_lag=1, source_policy_step=79),
+            "current_control",
+            trial_seed=17,
+        )
+
+        self.assertEqual(
+            record,
+            {
+                "kind": "current_image_control",
+                "policy_step": 80,
+                "input_policy_step": 80,
+                "matched_stale_image_lag": 1,
+                "matched_stale_source_policy_step": 79,
+                "trial_seed": 17,
+            },
         )
 
     def test_initial_state_hash_includes_values_shape_and_dtype(self) -> None:

@@ -128,6 +128,7 @@ class Arguments:
     fault_site: str | None
     fault_manifest: Path | None
     stale_image_manifest: Path | None
+    image_input_mode: str
     fault_layer: int | None
     fault_policy_step: int | None
     fault_generation_step: int
@@ -183,6 +184,11 @@ def _parse_arguments() -> Arguments:
     parser.add_argument("--fault-site", choices=FAULT_SITES)
     parser.add_argument("--fault-manifest", type=Path)
     parser.add_argument("--stale-image-manifest", type=Path)
+    parser.add_argument(
+        "--image-input-mode",
+        choices=("stale", "current_control"),
+        default="stale",
+    )
     parser.add_argument("--fault-layer", type=int)
     parser.add_argument("--fault-policy-step", type=int)
     parser.add_argument("--fault-generation-step", type=int, default=0)
@@ -202,6 +208,10 @@ def _parse_arguments() -> Arguments:
 
 
 def _fault_spec(args: Arguments) -> FaultSpec | None:
+    if args.image_input_mode != "stale" and args.stale_image_manifest is None:
+        raise ValueError(
+            "--image-input-mode current_control requires --stale-image-manifest"
+        )
     if args.stale_image_manifest is not None:
         static_values = (
             args.fault_site,
@@ -255,6 +265,23 @@ def _fault_spec(args: Arguments) -> FaultSpec | None:
         seed=args.fault_seed,
         feature_index=args.fault_feature_index,
     )
+
+
+def _image_intervention_record(
+    spec: StaleImageSpec, mode: str, trial_seed: int
+) -> dict[str, Any]:
+    if mode == "stale":
+        return {**spec.to_dict(), "trial_seed": trial_seed}
+    if mode == "current_control":
+        return {
+            "kind": "current_image_control",
+            "policy_step": spec.policy_step,
+            "input_policy_step": spec.policy_step,
+            "matched_stale_image_lag": spec.image_lag,
+            "matched_stale_source_policy_step": spec.source_policy_step,
+            "trial_seed": trial_seed,
+        }
+    raise ValueError(f"unsupported image input mode: {mode}")
 
 
 def _git_revision(path: Path) -> str:
@@ -735,7 +762,7 @@ def _run_trial(
         intervention_step = fault_injector.spec.policy_step
     elif stale_image_spec is not None:
         intervention_step = stale_image_spec.policy_step
-    stale_record = None
+    image_intervention_record = None
 
     for policy_step in range(MAX_STEPS[args.task_suite]):
         if clean_trace is not None and intervention_step is not None and policy_step <= intervention_step:
@@ -788,11 +815,13 @@ def _run_trial(
                     f"stale-image source step {stale_image_spec.source_policy_step} "
                     f"is unavailable at policy step {policy_step}"
                 )
-            policy_image = policy_images[stale_image_spec.source_policy_step].copy()
-            stale_record = {
-                **stale_image_spec.to_dict(),
-                "trial_seed": trial_seed,
-            }
+            if args.image_input_mode == "stale":
+                policy_image = policy_images[
+                    stale_image_spec.source_policy_step
+                ].copy()
+            image_intervention_record = _image_intervention_record(
+                stale_image_spec, args.image_input_mode, trial_seed
+            )
         state = runtime.np.concatenate(
             (
                 observation["robot0_eef_pos"],
@@ -881,9 +910,9 @@ def _run_trial(
     if fault_injector is not None:
         fault_record = fault_injector.require_injected()
     elif stale_image_spec is not None:
-        if stale_record is None:
-            raise RuntimeError("stale-image intervention was never applied")
-        fault_record = stale_record
+        if image_intervention_record is None:
+            raise RuntimeError("image intervention was never applied")
+        fault_record = image_intervention_record
     condition = run_condition if fault_record else "clean"
 
     stem = safe_stem(trial, success)
@@ -1032,12 +1061,19 @@ def main() -> None:
         }
         run_condition = "activation_fault"
     elif stale_manifest is not None:
+        input_mode = args.image_input_mode
         fault_model = {
-            "kind": "per_trial_stale_image_manifest",
+            "kind": (
+                "per_trial_stale_image_manifest"
+                if input_mode == "stale"
+                else "per_trial_current_image_control_manifest"
+            ),
             "selection_basis": stale_manifest.selection_basis,
             "trial_count": len(plan),
         }
-        run_condition = "stale_image"
+        run_condition = (
+            "stale_image" if input_mode == "stale" else "current_image_control"
+        )
     elif static_fault_spec is not None:
         fault_model = static_fault_spec.to_dict()
         run_condition = "activation_fault"

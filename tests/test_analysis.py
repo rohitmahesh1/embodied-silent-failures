@@ -157,6 +157,15 @@ class AnalysisTests(unittest.TestCase):
 
         self.assertEqual(outcome.category, SILENT_FAULT_FAILURE)
 
+    def test_pair_accepts_current_image_control(self) -> None:
+        outcome = classify_pair(
+            self.result("clean", True),
+            self.result("current_image_control", True),
+            Alarm(False, None),
+        )
+
+        self.assertEqual(outcome.category, PRESERVED_SUCCESS)
+
 
 if __name__ == "__main__":
     unittest.main()
