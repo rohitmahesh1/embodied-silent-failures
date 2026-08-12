@@ -234,6 +234,7 @@ def _candidate_records(
     ):
         raise RuntimeError("clean token decoding disagrees with OpenVLA action")
     clean_executed = _executed_gripper(runtime, clean_action, clean_raw_gripper)
+    clean_maximum_absolute_feature = float(torch.max(torch.abs(hidden.float())).item())
     records = []
     for row, (estimated_margin, feature, bit_index, after) in enumerate(approximate):
         candidate_token = int(candidate_tokens[row].item())
@@ -251,6 +252,10 @@ def _candidate_records(
                 "before_value": float(hidden[feature].item()),
                 "after_value": after,
                 "absolute_feature_change": abs(after - float(hidden[feature].item())),
+                "clean_maximum_absolute_feature": clean_maximum_absolute_feature,
+                "fault_to_clean_maximum_ratio": (
+                    abs(after) / clean_maximum_absolute_feature
+                ),
                 "estimated_runner_up_margin": estimated_margin,
                 "clean_token": token,
                 "fault_token": candidate_token,
@@ -366,12 +371,31 @@ def main() -> None:
                 runtime.set_seed_everywhere(trial_seed)
                 clean_result = clean_results[trial]
                 trace = load_clean_trace(clean_result)
-                step = _probe_step(
-                    trace,
-                    args.timing,
-                    args.policy_step,
-                    args.minimum_policy_step,
-                )
+                try:
+                    step = _probe_step(
+                        trace,
+                        args.timing,
+                        args.policy_step,
+                        args.minimum_policy_step,
+                    )
+                except ValueError as error:
+                    if args.timing != "first_gripper_transition":
+                        raise
+                    records.append(
+                        {
+                            "task_id": trial.task_id,
+                            "episode_index": trial.episode_index,
+                            "trial_seed": trial_seed,
+                            "timing": args.timing,
+                            "status": "ineligible_timing",
+                            "reason": str(error),
+                        }
+                    )
+                    print(
+                        f"skipped task {trial.task_id}, episode {trial.episode_index}: "
+                        f"{error}"
+                    )
+                    continue
                 initial_state = initial_states[task_id][trial.episode_index]
                 if _array_sha256(runtime, initial_state) != clean_result["initial_state_sha256"]:
                     raise RuntimeError("clean reference initial state does not match LIBERO")
@@ -413,6 +437,9 @@ def main() -> None:
                     "trial_seed": trial_seed,
                     "policy_step": step,
                     "timing": args.timing,
+                    "status": (
+                        "selected" if selected is not None else "no_effective_candidate"
+                    ),
                     "replay_maximum_numeric_observation_error": replay_error,
                     "candidate_count": len(candidates),
                     "action_changing_candidate_count": sum(
