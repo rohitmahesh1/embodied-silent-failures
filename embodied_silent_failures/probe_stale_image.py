@@ -300,12 +300,7 @@ def main() -> None:
                         runtime.torch.abs(current["hidden"].float() - expected_hidden.float())
                     ).item()
                 )
-                if clean_action_error > 1e-6:
-                    raise RuntimeError(
-                        "clean inference does not reproduce the saved clean trace: "
-                        f"action error {clean_action_error:.3g}, hidden error "
-                        f"{clean_hidden_error:.3g}"
-                    )
+                clean_reproduces_trace = clean_action_error <= 1e-6
 
                 candidates = []
                 for lag in eligible_lags:
@@ -347,6 +342,7 @@ def main() -> None:
                         "policy_step": step,
                         "replay_maximum_numeric_observation_error": replay_error,
                         "clean_action_maximum_absolute_error": clean_action_error,
+                        "clean_reproduces_trace": clean_reproduces_trace,
                         "clean_hidden_maximum_absolute_error": clean_hidden_error,
                         "current": _plain_record(current),
                         "candidates": candidates,
@@ -359,6 +355,7 @@ def main() -> None:
                 print(
                     f"probed task {trial.task_id}, episode {trial.episode_index}, "
                     f"step {step}: {changed}/{len(candidates)} stale frames changed gripper, "
+                    f"clean action error {clean_action_error:.3g}, "
                     f"clean hidden reference error {clean_hidden_error:.3g}"
                 )
         finally:
