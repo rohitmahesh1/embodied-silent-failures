@@ -29,6 +29,7 @@ from embodied_silent_failures.faults import (
     FaultSpec,
     TransientActivationFault,
 )
+from embodied_silent_failures.fault_manifest import load_fault_manifest
 from embodied_silent_failures.plan import (
     Trial,
     build_trial_plan,
@@ -36,12 +37,19 @@ from embodied_silent_failures.plan import (
     parse_task_ids,
     seed_for_trial,
 )
+from embodied_silent_failures.replay import (
+    CleanTrace,
+    load_clean_trace,
+    observation_error,
+    replay_action,
+)
 
 
 OPENVLA_REVISION = "300dce26d44f407c725695d16cd445755c92cbd1"
 LIBERO_REVISION = "8f1084e3132a39270c3a13ebe37270a43ece2a01"
 CHECKPOINT_REVISION = "80970322773f81baa2e22fe495d0487b93a05cfa"
 CONTAINER_IMAGE = "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04"
+REPLAY_OBSERVATION_TOLERANCE = 1e-6
 
 EXPECTED_PACKAGES = {
     "flash-attn": "2.5.5",
@@ -83,11 +91,14 @@ class Arguments:
     save_video: bool
     resume: bool
     fault_site: str | None
+    fault_manifest: Path | None
     fault_layer: int | None
     fault_policy_step: int | None
     fault_generation_step: int
     fault_bit_index: int | None
+    fault_feature_index: int | None
     fault_seed: int
+    replay_clean_prefix: bool
     paired_clean_dirs: list[Path]
 
 
@@ -134,11 +145,14 @@ def _parse_arguments() -> Arguments:
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--fault-site", choices=FAULT_SITES)
+    parser.add_argument("--fault-manifest", type=Path)
     parser.add_argument("--fault-layer", type=int)
     parser.add_argument("--fault-policy-step", type=int)
     parser.add_argument("--fault-generation-step", type=int, default=0)
     parser.add_argument("--fault-bit-index", type=int)
+    parser.add_argument("--fault-feature-index", type=int)
     parser.add_argument("--fault-seed", type=int, default=0)
+    parser.add_argument("--replay-clean-prefix", action="store_true")
     parser.add_argument(
         "--paired-clean-dir",
         dest="paired_clean_dirs",
@@ -151,6 +165,17 @@ def _parse_arguments() -> Arguments:
 
 
 def _fault_spec(args: Arguments) -> FaultSpec | None:
+    if args.fault_manifest is not None:
+        static_values = (
+            args.fault_site,
+            args.fault_layer,
+            args.fault_policy_step,
+            args.fault_bit_index,
+            args.fault_feature_index,
+        )
+        if any(value is not None for value in static_values):
+            raise ValueError("--fault-manifest cannot be combined with static fault options")
+        return None
     if args.fault_site is None:
         if any(
             value is not None
@@ -158,6 +183,7 @@ def _fault_spec(args: Arguments) -> FaultSpec | None:
                 args.fault_layer,
                 args.fault_policy_step,
                 args.fault_bit_index,
+                args.fault_feature_index,
             )
         ):
             raise ValueError("fault options require --fault-site")
@@ -175,6 +201,7 @@ def _fault_spec(args: Arguments) -> FaultSpec | None:
         generation_step=args.fault_generation_step,
         bit_index=args.fault_bit_index,
         seed=args.fault_seed,
+        feature_index=args.fault_feature_index,
     )
 
 
@@ -190,7 +217,14 @@ def _git_revision(path: Path) -> str:
 
 
 def _validate_inputs(args: Arguments) -> None:
-    _fault_spec(args)
+    fault_spec = _fault_spec(args)
+    has_fault = fault_spec is not None or args.fault_manifest is not None
+    if args.replay_clean_prefix and not has_fault:
+        raise ValueError("--replay-clean-prefix requires a fault")
+    if has_fault and not args.paired_clean_dirs:
+        raise ValueError("fault experiments require at least one --paired-clean-dir")
+    if args.fault_manifest is not None and not args.fault_manifest.is_file():
+        raise FileNotFoundError(f"fault manifest is not a file: {args.fault_manifest}")
     for name, path in {
         "checkpoint": args.checkpoint,
         "OpenVLA root": args.openvla_root,
@@ -365,7 +399,7 @@ def _run_metadata(
     args: Arguments,
     runtime: Runtime,
     plan: list[Trial],
-    fault_spec: FaultSpec | None,
+    fault_model: dict[str, Any] | None,
 ) -> dict[str, Any]:
     package_versions = {
         package: importlib.metadata.version(package) for package in EXPECTED_PACKAGES
@@ -384,6 +418,9 @@ def _run_metadata(
     config["trial_manifest"] = (
         str(args.trial_manifest.resolve()) if args.trial_manifest else None
     )
+    config["fault_manifest"] = (
+        str(args.fault_manifest.resolve()) if args.fault_manifest else None
+    )
     config["paired_clean_dirs"] = [
         str(path.resolve()) for path in args.paired_clean_dirs
     ]
@@ -392,7 +429,7 @@ def _run_metadata(
     project_root = Path(__file__).resolve().parents[1]
     return {
         "schema_version": 1,
-        "condition": "activation_fault" if fault_spec else "clean",
+        "condition": "activation_fault" if fault_model else "clean",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "configuration": config,
         "trial_count": len(plan),
@@ -400,7 +437,7 @@ def _run_metadata(
             {**trial.to_dict(), "seed": seed_for_trial(args.seed, trial)}
             for trial in plan
         ],
-        "fault_model": fault_spec.to_dict() if fault_spec else None,
+        "fault_model": fault_model,
         "upstream_revisions": {
             "experiment_code": _git_revision(project_root),
             "experiment_code_dirty": _git_dirty(project_root),
@@ -416,6 +453,9 @@ def _run_metadata(
         },
         "trial_manifest_sha256": (
             _sha256(args.trial_manifest) if args.trial_manifest else None
+        ),
+        "fault_manifest_sha256": (
+            _sha256(args.fault_manifest) if args.fault_manifest else None
         ),
         "machine": {
             "hostname": socket.gethostname(),
@@ -475,7 +515,7 @@ def _paired_clean_results(
                 if any(indexed[trial].get(key) != result.get(key) for key in fields):
                     raise ValueError(f"paired clean results conflict for {trial}")
                 continue
-            indexed[trial] = result
+            indexed[trial] = {**result, "_source_dir": str(directory.resolve())}
 
     missing = [trial for trial in plan if trial not in indexed]
     if missing:
@@ -576,6 +616,7 @@ def _run_trial(
     trial_seed: int,
     initial_state_sha256: str,
     fault_injector: TransientActivationFault | None,
+    clean_trace: CleanTrace | None,
 ) -> dict[str, Any]:
     runtime.torch.cuda.reset_peak_memory_stats()
     rollout_started = time.perf_counter()
@@ -592,10 +633,54 @@ def _run_trial(
     inference_seconds: list[float] = []
     simulator_seconds: list[float] = []
     success = False
+    replay_maximum_error = 0.0
+    replayed_steps = 0
     if fault_injector is not None:
         fault_injector.begin_trial(trial_seed)
 
     for policy_step in range(MAX_STEPS[args.task_suite]):
+        if clean_trace is not None and policy_step <= fault_injector.spec.policy_step:
+            error = observation_error(
+                runtime.np, clean_trace, observation, policy_step
+            )
+            replay_maximum_error = max(replay_maximum_error, error)
+            if error > REPLAY_OBSERVATION_TOLERANCE:
+                raise RuntimeError(
+                    f"counterfactual replay diverged at step {policy_step}: "
+                    f"maximum numeric observation error {error:.3g} exceeds "
+                    f"{REPLAY_OBSERVATION_TOLERANCE:.3g}"
+                )
+
+        if clean_trace is not None and policy_step < fault_injector.spec.policy_step:
+            if args.save_video:
+                resize_size = runtime.get_image_resize_size(model_config)
+                replay_images.append(runtime.get_libero_image(observation, resize_size))
+            hidden_history.append(
+                runtime.torch.as_tensor(clean_trace.hidden_states[policy_step])
+                .detach()
+                .cpu()
+            )
+            observation_history.append(_numeric_observation(runtime, observation))
+            row = dict(clean_trace.rows[policy_step])
+            row["timing/inference_seconds"] = 0.0
+            row["fault/injected"] = False
+            action = replay_action(runtime.np, clean_trace, policy_step)
+
+            simulator_started = time.perf_counter()
+            observation, reward, done, _ = env.step(action.tolist())
+            simulator_seconds.append(time.perf_counter() - simulator_started)
+            row["timing/simulator_seconds"] = simulator_seconds[-1]
+            row["environment/reward"] = reward
+            row["environment/done"] = bool(done)
+            rows.append(row)
+            replayed_steps += 1
+            if done:
+                raise RuntimeError(
+                    f"clean-prefix replay terminated before fault step "
+                    f"{fault_injector.spec.policy_step}"
+                )
+            continue
+
         image = runtime.get_libero_image(observation, resize_size)
         state = runtime.np.concatenate(
             (
@@ -633,7 +718,8 @@ def _run_trial(
 
         hidden_history.append(_extract_hidden_states(runtime, generated))
         observation_history.append(_numeric_observation(runtime, observation))
-        replay_images.append(image)
+        if args.save_video:
+            replay_images.append(image)
 
         metrics = runtime.compute_token_uncertainty_metrics(generated, model)
         row: dict[str, Any] = {
@@ -737,6 +823,18 @@ def _run_trial(
         "artifact_seconds": artifact_seconds,
         "peak_cuda_memory_bytes": runtime.torch.cuda.max_memory_allocated(),
         "fault": fault_record,
+        "counterfactual_replay": (
+            {
+                "enabled": True,
+                "replayed_policy_steps": replayed_steps,
+                "policy_inferences": len(inference_seconds),
+                "maximum_numeric_observation_error": replay_maximum_error,
+                "observation_tolerance": REPLAY_OBSERVATION_TOLERANCE,
+                "clean_source_directory": str(clean_trace.source_dir),
+            }
+            if clean_trace is not None
+            else {"enabled": False}
+        ),
         "files": {
             "csv": csv_path.name,
             "pickle": pickle_path.name,
@@ -749,8 +847,17 @@ def _run_trial(
 
 def main() -> None:
     args = _parse_arguments()
-    fault_spec = _fault_spec(args)
-    if args.trial_manifest is None:
+    static_fault_spec = _fault_spec(args)
+    _validate_inputs(args)
+
+    manifest = None
+    if args.fault_manifest is not None:
+        if args.trial_manifest is not None:
+            raise ValueError("--fault-manifest already defines the trial plan")
+        manifest = load_fault_manifest(args.fault_manifest)
+        fault_specs = manifest.specs
+        plan = sorted(fault_specs)
+    elif args.trial_manifest is None:
         task_ids = parse_task_ids(args.task_ids)
         plan = build_trial_plan(
             task_ids,
@@ -760,31 +867,46 @@ def main() -> None:
         )
     else:
         plan = load_trial_manifest(args.trial_manifest)
-        task_ids = sorted({trial.task_id for trial in plan})
-    _validate_inputs(args)
+    task_ids = sorted({trial.task_id for trial in plan})
+    if static_fault_spec is not None:
+        fault_specs = {trial: static_fault_spec for trial in plan}
+    elif manifest is None:
+        fault_specs = {}
+
     paired_clean: dict[Trial, dict[str, Any]] = {}
-    if fault_spec is not None:
+    if fault_specs:
         requested_count = len(plan)
         plan, paired_clean = _paired_clean_results(args.paired_clean_dirs, plan)
         too_short = [
             trial
             for trial in plan
-            if int(paired_clean[trial]["policy_steps"]) <= fault_spec.policy_step
+            if int(paired_clean[trial]["policy_steps"])
+            <= fault_specs[trial].policy_step
         ]
         if too_short:
             preview = ", ".join(
                 f"{trial.task_id}/{trial.episode_index}" for trial in too_short[:5]
             )
             raise ValueError(
-                f"fault policy step {fault_spec.policy_step} is not before paired "
-                f"clean completion for {preview}"
+                f"fault policy step is not before paired clean completion for {preview}"
             )
         print(
             f"fault eligibility: {len(plan)} clean successes selected from "
             f"{requested_count} paired rollouts"
         )
+    if manifest is not None:
+        fault_model = {
+            "kind": "per_trial_fault_manifest",
+            "selection_basis": manifest.selection_basis,
+            "trial_count": len(plan),
+        }
+    elif static_fault_spec is not None:
+        fault_model = static_fault_spec.to_dict()
+    else:
+        fault_model = None
+
     runtime = _load_runtime(args.openvla_root, args.libero_root)
-    metadata = _run_metadata(args, runtime, plan, fault_spec)
+    metadata = _run_metadata(args, runtime, plan, fault_model)
     _prepare_run(args, metadata)
 
     benchmark_class = runtime.benchmark.get_benchmark_dict()[args.task_suite]
@@ -833,11 +955,6 @@ def main() -> None:
             )
         model_config.unnorm_key = alternate_key
 
-    fault_injector = None
-    if fault_spec is not None:
-        fault_injector = TransientActivationFault(runtime.torch, fault_spec)
-        fault_injector.install(model)
-
     completed = 0
     successes = 0
     for task_id in task_ids:
@@ -855,7 +972,9 @@ def main() -> None:
                 runtime.set_seed_everywhere(trial_seed)
                 initial_state = initial_states_by_task[task_id][trial.episode_index]
                 initial_state_sha256 = _array_sha256(runtime, initial_state)
-                if fault_spec is not None:
+                clean_trace = None
+                trial_fault_spec = fault_specs.get(trial)
+                if trial_fault_spec is not None:
                     clean_result = paired_clean[trial]
                     if clean_result.get("initial_state_sha256") != initial_state_sha256:
                         raise ValueError(
@@ -867,24 +986,37 @@ def main() -> None:
                             f"paired clean seed does not match task {trial.task_id}, "
                             f"episode {trial.episode_index}"
                         )
+                    if args.replay_clean_prefix:
+                        clean_trace = load_clean_trace(clean_result)
                 print(
                     f"[{index}/{len(plan)}] running task {trial.task_id}, "
                     f"episode {trial.episode_index}, seed {trial_seed}"
                 )
-                result = _run_trial(
-                    args,
-                    runtime,
-                    model_config,
-                    model,
-                    processor,
-                    trial,
-                    env,
-                    task_description,
-                    initial_state,
-                    trial_seed,
-                    initial_state_sha256,
-                    fault_injector,
-                )
+                fault_injector = None
+                if trial_fault_spec is not None:
+                    fault_injector = TransientActivationFault(
+                        runtime.torch, trial_fault_spec
+                    )
+                    fault_injector.install(model)
+                try:
+                    result = _run_trial(
+                        args,
+                        runtime,
+                        model_config,
+                        model,
+                        processor,
+                        trial,
+                        env,
+                        task_description,
+                        initial_state,
+                        trial_seed,
+                        initial_state_sha256,
+                        fault_injector,
+                        clean_trace,
+                    )
+                finally:
+                    if fault_injector is not None:
+                        fault_injector.close()
                 completed += 1
                 successes += int(result["success"])
                 print(
@@ -900,8 +1032,6 @@ def main() -> None:
             f"run complete: {completed} new trials, {successes} successes "
             f"({successes / completed:.1%})"
         )
-    if fault_injector is not None:
-        fault_injector.close()
 
 
 if __name__ == "__main__":

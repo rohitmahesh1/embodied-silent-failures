@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterator
 
 
-FAULT_SITES = ("decoder_layer", "action_logits")
+FAULT_SITES = ("decoder_layer", "final_hidden", "action_logits")
 
 
 @dataclass(frozen=True)
@@ -16,14 +16,15 @@ class FaultSpec:
     generation_step: int
     bit_index: int | None
     seed: int
+    feature_index: int | None = None
 
     def __post_init__(self) -> None:
         if self.site not in FAULT_SITES:
             raise ValueError(f"unsupported fault site: {self.site}")
         if self.site == "decoder_layer" and self.layer is None:
             raise ValueError("decoder_layer faults require a layer")
-        if self.site == "action_logits" and self.layer is not None:
-            raise ValueError("action_logits faults do not take a layer")
+        if self.site != "decoder_layer" and self.layer is not None:
+            raise ValueError(f"{self.site} faults do not take a layer")
         if self.layer is not None and self.layer < 0:
             raise ValueError("fault layer must be non-negative")
         if self.policy_step < 0:
@@ -32,20 +33,38 @@ class FaultSpec:
             raise ValueError("fault generation step must be between 0 and 6")
         if self.bit_index is not None and self.bit_index < 0:
             raise ValueError("fault bit index must be non-negative")
+        if self.feature_index is not None and self.feature_index < 0:
+            raise ValueError("fault feature index must be non-negative")
         if self.seed < 0:
             raise ValueError("fault seed must be non-negative")
 
     def to_dict(self) -> dict[str, Any]:
-        evidence_relation = (
-            "directly_shared"
-            if self.site == "decoder_layer"
-            else "post_tap_with_autoregressive_feedback"
-        )
+        evidence_relation = {
+            "decoder_layer": "upstream_of_monitor_tap",
+            "final_hidden": "exact_monitor_input_when_targeting_monitored_token",
+            "action_logits": "post_tap_with_autoregressive_feedback",
+        }[self.site]
         return {
             "kind": "single_transient_activation_bit_flip",
             "evidence_relation": evidence_relation,
             **asdict(self),
         }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "FaultSpec":
+        fields = (
+            "site",
+            "layer",
+            "policy_step",
+            "generation_step",
+            "bit_index",
+            "seed",
+            "feature_index",
+        )
+        missing = [field for field in fields[:6] if field not in value]
+        if missing:
+            raise ValueError(f"fault specification is missing {', '.join(missing)}")
+        return cls(**{field: value.get(field) for field in fields})
 
 
 def _event_seed(spec: FaultSpec, trial_seed: int) -> int:
@@ -136,6 +155,8 @@ class TransientActivationFault:
                     f"OpenVLA has {len(layers)} decoder layers, requested {self.spec.layer}"
                 )
             module = layers[self.spec.layer]
+        elif self.spec.site == "final_hidden":
+            module = model.language_model.model.norm
         else:
             module = model.language_model.lm_head
 
@@ -217,7 +238,15 @@ class TransientActivationFault:
 
         rng = random.Random(_event_seed(self.spec, trial_seed))
         shape = tuple(tensor.shape)
-        feature_index = rng.randrange(shape[-1])
+        feature_index = (
+            self.spec.feature_index
+            if self.spec.feature_index is not None
+            else rng.randrange(shape[-1])
+        )
+        if not 0 <= feature_index < shape[-1]:
+            raise IndexError(
+                f"feature index {feature_index} is outside [0, {shape[-1]})"
+            )
         flat_index = _active_token_flat_index(shape, feature_index)
         bit_index = (
             self.spec.bit_index
@@ -254,6 +283,9 @@ class TransientActivationFault:
             "tensor_dtype": str(tensor.dtype),
             "sequence_index": shape[1] - 1,
             "feature_index": feature_index,
+            "feature_selection": (
+                "exact" if self.spec.feature_index is not None else "seeded_uniform"
+            ),
             "flat_index": flat_index,
             "indices": _indices_for_flat_index(shape, flat_index),
             "actual_bit_index": bit_index,

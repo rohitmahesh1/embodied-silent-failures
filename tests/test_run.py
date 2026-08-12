@@ -32,11 +32,14 @@ class RunTests(unittest.TestCase):
             save_video=True,
             resume=resume,
             fault_site=None,
+            fault_manifest=None,
             fault_layer=None,
             fault_policy_step=None,
             fault_generation_step=0,
             fault_bit_index=None,
+            fault_feature_index=None,
             fault_seed=0,
+            replay_clean_prefix=False,
             paired_clean_dirs=[],
         )
 
@@ -105,6 +108,7 @@ class RunTests(unittest.TestCase):
 
             self.assertEqual(eligible, [Trial(0, 0)])
             self.assertEqual(set(indexed), set(plan))
+            self.assertEqual(indexed[Trial(0, 0)]["_source_dir"], str(clean_dir))
 
     def test_paired_clean_results_reject_missing_references(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
