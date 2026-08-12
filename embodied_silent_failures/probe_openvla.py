@@ -271,7 +271,7 @@ def _candidate_records(
         counts["finite"] += int(finite.sum().item())
         counts["within_global_range"] += int(in_global.sum().item())
         counts["within_coordinate_range"] += int(in_coordinate.sum().item())
-        for feature in torch.flatnonzero(in_coordinate).tolist():
+        for feature in torch.nonzero(in_coordinate, as_tuple=False).flatten().tolist():
             candidates.append(
                 (
                     int(feature),
