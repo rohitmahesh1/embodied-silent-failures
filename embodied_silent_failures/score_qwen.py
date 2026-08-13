@@ -1,6 +1,5 @@
 import argparse
 import importlib.metadata
-import inspect
 import json
 import re
 import subprocess
@@ -31,6 +30,8 @@ from embodied_silent_failures.qwen_artifacts import (
     json_sha256,
     load_trial_manifest,
     prepare_output,
+    snapshot_manifest,
+    source_file_record,
     trial_checkpoint,
 )
 
@@ -83,33 +84,6 @@ def _git_dirty(path: Path) -> bool:
         text=True,
     )
     return bool(result.stdout.strip())
-
-
-def _snapshot_manifest(snapshot: Path) -> dict[str, Any]:
-    entries = []
-    for path in sorted(item for item in snapshot.rglob("*") if item.is_file()):
-        entries.append(
-            {
-                "path": str(path.relative_to(snapshot)),
-                "size": path.stat().st_size,
-                "sha256": file_sha256(path),
-            }
-        )
-    if not entries:
-        raise ValueError(f"model snapshot contains no files: {snapshot}")
-    return {"files": entries, "sha256": json_sha256(entries)}
-
-
-def _source_file_record(value: Any) -> dict[str, Any]:
-    path_value = inspect.getsourcefile(type(value))
-    if path_value is None:
-        raise RuntimeError(f"cannot locate source for {type(value).__qualname__}")
-    path = Path(path_value).resolve()
-    return {
-        "class": f"{type(value).__module__}.{type(value).__qualname__}",
-        "path": str(path),
-        "sha256": file_sha256(path),
-    }
 
 
 def _processor_configuration(processor: Any) -> dict[str, Any]:
@@ -273,7 +247,7 @@ def main() -> None:
             cache_dir=str(args.cache_dir) if args.cache_dir is not None else None,
         )
     ).resolve()
-    snapshot_manifest = _snapshot_manifest(snapshot)
+    snapshot_record = snapshot_manifest(snapshot)
     configuration = {
         "paper_basis": HIDE_AND_SEEK_PAPER,
         "selection_basis": manifest["selection_basis"],
@@ -281,8 +255,8 @@ def main() -> None:
         "model": {
             "id": QWEN_MODEL_ID,
             "revision": args.model_revision,
-            "snapshot_sha256": snapshot_manifest["sha256"],
-            "snapshot_files": snapshot_manifest["files"],
+            "snapshot_sha256": snapshot_record["sha256"],
+            "snapshot_files": snapshot_record["files"],
         },
         "protocol": {
             "history_frames": args.history_frames,
@@ -348,8 +322,8 @@ def main() -> None:
         "opencv_version": cv2.__version__,
         "numpy_version": np.__version__,
         "cuda_device": torch.cuda.get_device_name(model.device),
-        "model_implementation": _source_file_record(model),
-        "processor_implementation": _source_file_record(processor),
+        "model_implementation": source_file_record(model),
+        "processor_implementation": source_file_record(processor),
         "processor_configuration": _processor_configuration(processor),
     }
     existing_runtime = run_record.get("runtime")

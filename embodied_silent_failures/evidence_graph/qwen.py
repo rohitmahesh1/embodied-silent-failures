@@ -231,6 +231,47 @@ def record_monitor_input(
     return request
 
 
+def record_processor_output(
+    recorder: Recorder,
+    request: QwenRequest,
+    processed: Any,
+    *,
+    processor_basis: str,
+) -> None:
+    if not processor_basis.startswith("code:"):
+        raise ValueError("processor basis must identify pinned implementation code")
+    recorder.mark(
+        "qwen.processor_output",
+        inputs=request,
+        outputs=processed,
+        basis=[HIDE_AND_SEEK_PAPER, MEDIA_BASIS, processor_basis],
+        region="qwen_processor",
+        fault_interface="qwen_processor_output",
+    )
+
+
+def record_traced_response(
+    recorder: Recorder,
+    generated: Any,
+    generated_token_ids: Sequence[int],
+    raw_response: str,
+    *,
+    model_basis: str,
+) -> LineageValue:
+    if not model_basis.startswith("code:"):
+        raise ValueError("model basis must identify pinned implementation code")
+    response = recorder.lineage("qwen:traced:raw_response", raw_response)
+    recorder.mark(
+        "qwen.raw_response",
+        inputs={"generated": generated, "token_ids": list(generated_token_ids)},
+        outputs=response,
+        basis=[HIDE_AND_SEEK_PAPER, model_basis],
+        region="qwen_response_decode",
+        fault_interface="qwen_response_decode",
+    )
+    return response
+
+
 def record_model_response(
     recorder: Recorder,
     request: QwenRequest,
@@ -260,6 +301,61 @@ def record_model_response(
         },
     )
     return response
+
+
+def internal_annotations(
+    events: list[dict[str, Any]], *, model_basis: str
+) -> list[dict[str, Any]]:
+    if not model_basis.startswith("code:"):
+        raise ValueError("model basis must identify pinned implementation code")
+    annotations = []
+    for event in events:
+        if event["kind"] not in {"module", "operator", "state"}:
+            continue
+        details = event.get("details", {})
+        registrations = details.get("registrations", [])
+        is_model_state = details.get("root") == "qwen_model" and bool(registrations)
+        if event.get("context", {}).get("phase") != "qwen_model" and not is_model_state:
+            continue
+
+        calls = details.get("module_calls", [])
+        module_path = details.get("module_path") or (
+            calls[-1].get("path") if calls else ""
+        )
+        if is_model_state:
+            paths = sorted(item["module_path"] for item in registrations)
+            owners = {_module_owner(path) for path in paths}
+            region = owners.pop() if len(owners) == 1 else "qwen_model_shared_state"
+            semantic_key = f"qwen_model/state/{'+'.join(paths)}"
+            observed_basis = "observed:torch-model-state:" + "+".join(paths)
+            fault_interface = "registered_qwen_model_state"
+        else:
+            region = _module_owner(module_path)
+            semantic_key = f"qwen_model/module/{module_path or event['name']}"
+            observed_basis = f"observed:torch-module:{module_path or event['name']}"
+            fault_interface = "qwen_internal_compute"
+        annotations.append(
+            {
+                "event_id": event["event_id"],
+                "region": region,
+                "semantic_key": semantic_key,
+                "basis": [HIDE_AND_SEEK_PAPER, model_basis, observed_basis],
+                "lifetime": "step",
+                "fault_interface": fault_interface,
+            }
+        )
+    return annotations
+
+
+def _module_owner(module_path: str) -> str:
+    parts = module_path.split(".")
+    if not parts or parts[0] != "qwen_model":
+        return "qwen_model_unscoped"
+    if len(parts) == 1:
+        return "qwen_model_root"
+    if parts[1] == "model" and len(parts) >= 3:
+        return f"qwen_model_{parts[2]}"
+    return f"qwen_model_{parts[1]}"
 
 
 def record_decision(

@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import re
 from dataclasses import dataclass
@@ -51,6 +52,104 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"expected a JSON object in {path}")
     return value
+
+
+def snapshot_manifest(snapshot: Path) -> dict[str, Any]:
+    entries = []
+    for path in sorted(item for item in snapshot.rglob("*") if item.is_file()):
+        entries.append(
+            {
+                "path": str(path.relative_to(snapshot)),
+                "size": path.stat().st_size,
+                "sha256": file_sha256(path),
+            }
+        )
+    if not entries:
+        raise ValueError(f"model snapshot contains no files: {snapshot}")
+    return {"files": entries, "sha256": json_sha256(entries)}
+
+
+def source_file_record(value: Any) -> dict[str, Any]:
+    path_value = inspect.getsourcefile(type(value))
+    if path_value is None:
+        raise RuntimeError(f"cannot locate source for {type(value).__qualname__}")
+    path = Path(path_value).resolve()
+    return {
+        "class": f"{type(value).__module__}.{type(value).__qualname__}",
+        "path": str(path),
+        "sha256": file_sha256(path),
+    }
+
+
+def select_trace_query(
+    trials_dir: Path, *, configuration_sha256: str, history_frames: int
+) -> dict[str, Any]:
+    if history_frames <= 0:
+        raise ValueError("history frame count must be positive")
+    paths = sorted(trials_dir.glob("*.json"))
+    if not paths:
+        raise ValueError(f"Qwen trace selection found no trials: {trials_dir}")
+
+    candidates = []
+    census = []
+    for path in paths:
+        trial = load_json(path)
+        if trial.get("status") != "complete":
+            raise ValueError(f"Qwen trace selection found an incomplete trial: {path}")
+        if trial.get("configuration_sha256") != configuration_sha256:
+            raise ValueError(f"Qwen trace trial configuration disagrees: {path}")
+        eligible = []
+        for query in trial.get("timeline", []):
+            if len(query.get("frame_steps", [])) != history_frames:
+                continue
+            if query.get("parse_error") is not None or query.get("parsed_response") is None:
+                continue
+            tokens = query.get("generated_token_ids")
+            if not isinstance(tokens, list) or not tokens:
+                raise ValueError(f"eligible Qwen trace query has no generated tokens: {path}")
+            policy_step = int(query["policy_step"])
+            token_count = len(tokens)
+            eligible.append({"policy_step": policy_step, "generated_tokens": token_count})
+            candidates.append(
+                {
+                    "trial_path": path.resolve(),
+                    "trial": trial,
+                    "trial_sha256": file_sha256(path),
+                    "query": query,
+                    "policy_step": policy_step,
+                    "generated_tokens": token_count,
+                }
+            )
+        census.append(
+            {
+                "trial": path.name,
+                "trial_sha256": file_sha256(path),
+                "eligible_queries": eligible,
+            }
+        )
+    if not candidates:
+        raise ValueError("Qwen trace selection found no valid full-history queries")
+
+    candidates.sort(
+        key=lambda item: (
+            -item["generated_tokens"],
+            item["trial_path"].name,
+            item["policy_step"],
+        )
+    )
+    chosen = candidates[0]
+    chosen["selection"] = {
+        "basis": (
+            "protocol:qwen-internal-trace-v1:longest-valid-full-history-response-"
+            "then-lexical-trial-and-policy-step"
+        ),
+        "alarm_used_for_selection": False,
+        "trial_count": len(paths),
+        "eligible_query_count": len(candidates),
+        "census_sha256": json_sha256(census),
+        "rank": 1,
+    }
+    return chosen
 
 
 def load_trial_manifest(path: Path) -> tuple[dict[str, Any], list[TrialSource]]:
