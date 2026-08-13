@@ -788,6 +788,43 @@ class EvidenceGraphTests(unittest.TestCase):
         self.assertEqual(
             graph["raw_reachability"][prior["event_id"]], [sink["event_id"]]
         )
+
+    def test_stale_input_marks_the_unselected_current_visual_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = RolloutEvidence(
+                Path(directory) / "evidence", {"scope": "test"}, set()
+            )
+            evidence.begin_step(
+                2,
+                {"agentview_image": Value("camera")},
+                Value("current-image"),
+                Value("prior-image"),
+                source_step=1,
+                intervention={"kind": "stale_image"},
+            )
+            annotations = {
+                event["name"]: annotation
+                for event, annotation in (
+                    (
+                        event,
+                        next(
+                            item
+                            for item in evidence.recorder.annotations
+                            if item["event_id"] == event["event_id"]
+                        ),
+                    )
+                    for event in evidence.recorder.events
+                    if event["name"]
+                    in {"libero.current_observation", "libero.current_image"}
+                )
+            }
+            evidence.abort("test_complete")
+
+        expected = "current_visual_observation_not_selected_by_stale_policy_input"
+        self.assertEqual(
+            annotations["libero.current_observation"]["disposition"], expected
+        )
+        self.assertEqual(annotations["libero.current_image"]["disposition"], expected)
     def test_registered_state_groups_by_mechanical_module_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with Recorder(Path(directory) / "raw.jsonl", {"scope": "test"}) as recorder:

@@ -170,6 +170,11 @@ class RolloutEvidence:
         self._capture_mode = (
             "counterfactual_replay" if policy_replayed else "semantic_boundaries"
         )
+        current_visual_disposition = (
+            "current_visual_observation_not_selected_by_stale_policy_input"
+            if not policy_replayed and source_step != policy_step
+            else None
+        )
         with self.recorder.scope(policy_step=policy_step):
             record_current_observation(
                 self.recorder,
@@ -178,11 +183,16 @@ class RolloutEvidence:
                 disposition=(
                     "policy_inference_replaced_by_counterfactual_replay"
                     if policy_replayed
-                    else None
+                    else current_visual_disposition
                 ),
             )
             if not policy_replayed:
-                record_current_image(self.recorder, observation, current_image)
+                record_current_image(
+                    self.recorder,
+                    observation,
+                    current_image,
+                    disposition=current_visual_disposition,
+                )
                 record_policy_image(
                     self.recorder,
                     current_image,

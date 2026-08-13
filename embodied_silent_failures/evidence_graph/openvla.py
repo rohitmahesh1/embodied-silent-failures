@@ -175,7 +175,11 @@ def capture_policy(recorder: Recorder, model: Any):
 
 
 def record_current_image(
-    recorder: Recorder, observation: dict[str, Any], image: Any
+    recorder: Recorder,
+    observation: dict[str, Any],
+    image: Any,
+    *,
+    disposition: str | None = None,
 ) -> None:
     policy_step = _policy_step(recorder)
     recorder.mark(
@@ -185,6 +189,7 @@ def record_current_image(
         basis=IMAGE_BASIS,
         region="observation_pipeline",
         fault_interface="observation_image",
+        disposition=disposition,
     )
 
 
