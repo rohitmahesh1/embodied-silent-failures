@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 from embodied_silent_failures.analysis import Alarm, TREATMENT_CONDITIONS
 from embodied_silent_failures.artifacts import write_json_atomic
+from embodied_silent_failures.evidence_graph.rollout import attach_monitor_timeline
 
 
 SAFE_REVISION = "b6036abe07b2b2bb9996afb2c07f13d6a9f507c0"
@@ -59,6 +60,17 @@ def _git_revision(path: Path) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def _git_dirty(path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip())
 
 
 def _completion_results(run_dir: Path) -> dict[tuple[int, int], dict[str, Any]]:
@@ -169,13 +181,18 @@ def main() -> None:
     args = _parse_arguments()
     if args.batch_size <= 0:
         raise ValueError("batch size must be positive")
+    project_root = Path(__file__).resolve().parents[1]
     if _git_revision(args.safe_root) != SAFE_REVISION:
         raise RuntimeError(f"SAFE must be checked out at {SAFE_REVISION}")
+    for name, path in (("experiment code", project_root), ("SAFE", args.safe_root)):
+        if _git_dirty(path):
+            raise RuntimeError(f"{name} has uncommitted changes: {path}")
     if not args.run_dirs:
         raise ValueError("at least one fault run directory is required")
     labels = [path.name for path in args.run_dirs]
     if len(labels) != len(set(labels)):
         raise ValueError("fault run directories must have distinct names")
+    run_dirs_by_label = dict(zip(labels, args.run_dirs))
 
     monitor, monitor_paths = _validate_monitor(args.monitor_dir)
 
@@ -321,8 +338,16 @@ def main() -> None:
     output = {
         "schema_version": 2,
         "experiment_code_revision": _git_revision(
-            Path(__file__).resolve().parents[1]
+            project_root
         ),
+        "repository_states": {
+            "experiment_code": {
+                "revision": _git_revision(project_root),
+                "dirty": False,
+                "score_safe_sha256": _sha256(Path(__file__)),
+            },
+            "safe": {"revision": SAFE_REVISION, "dirty": False},
+        },
         "monitor": {
             "directory": str(args.monitor_dir.resolve()),
             "checkpoint_sha256": _sha256(monitor_paths["checkpoint"]),
@@ -345,6 +370,48 @@ def main() -> None:
         "records": records,
     }
     write_json_atomic(json_path, output)
+    primary_index = next(
+        (
+            index
+            for index, alpha in enumerate(alphas)
+            if math.isclose(
+                alpha, float(output["monitor"]["primary_alpha"]), rel_tol=0, abs_tol=1e-8
+            )
+        ),
+        None,
+    )
+    if primary_index is None:
+        raise ValueError("primary SAFE alpha is absent from the frozen threshold band")
+    for (label, _rollout, completion), values in zip(indexed_rollouts, scores):
+        evidence = completion.get("evidence_graph")
+        if not isinstance(evidence, dict):
+            continue
+        evidence_dir = Path(str(evidence["directory"]))
+        if not evidence_dir.is_dir() and evidence.get("directory_relative_to_run"):
+            evidence_dir = (
+                run_dirs_by_label[label] / evidence["directory_relative_to_run"]
+            ).resolve()
+        attach_monitor_timeline(
+            evidence_dir,
+            {
+                "kind": "safe_mlp",
+                "safe_revision": SAFE_REVISION,
+                "checkpoint_sha256": output["monitor"]["checkpoint_sha256"],
+                "configuration_sha256": output["monitor"]["configuration_sha256"],
+                "primary_alpha": output["monitor"]["primary_alpha"],
+                "source_run": label,
+            },
+            [
+                {
+                    "policy_step": step,
+                    "score": float(score) if math.isfinite(float(score)) else None,
+                    "score_finite": math.isfinite(float(score)),
+                    "threshold": float(bands[primary_index, step]),
+                    "alarm": bool(score >= bands[primary_index, step]),
+                }
+                for step, score in enumerate(values)
+            ],
+        )
     print(
         json.dumps(
             {

@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +29,11 @@ from embodied_silent_failures.faults import (
     FAULT_SITES,
     FaultSpec,
     TransientActivationFault,
+)
+from embodied_silent_failures.evidence_graph.rollout import (
+    RolloutEvidence,
+    prepare_evidence_output,
+    summarize_saturation,
 )
 from embodied_silent_failures.fault_manifest import load_fault_manifest
 from embodied_silent_failures.plan import (
@@ -137,6 +142,8 @@ class Arguments:
     fault_seed: int
     replay_clean_prefix: bool
     paired_clean_dirs: list[Path]
+    evidence_dir: Path | None = None
+    evidence_trace_steps: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -201,6 +208,14 @@ def _parse_arguments() -> Arguments:
         dest="paired_clean_dirs",
         action="append",
         type=Path,
+        default=[],
+    )
+    parser.add_argument("--evidence-dir", type=Path)
+    parser.add_argument(
+        "--evidence-trace-step",
+        dest="evidence_trace_steps",
+        action="append",
+        type=int,
         default=[],
     )
     namespace = parser.parse_args()
@@ -320,6 +335,14 @@ def _validate_inputs(args: Arguments) -> None:
     for path in args.paired_clean_dirs:
         if not path.is_dir():
             raise FileNotFoundError(f"paired clean directory is not a directory: {path}")
+    if any(step < 0 for step in args.evidence_trace_steps):
+        raise ValueError("evidence trace steps must be non-negative")
+    if any(step >= MAX_STEPS[args.task_suite] for step in args.evidence_trace_steps):
+        raise ValueError(
+            "evidence trace steps must be below the suite's maximum policy steps"
+        )
+    if args.evidence_trace_steps and args.evidence_dir is None:
+        raise ValueError("--evidence-trace-step requires --evidence-dir")
 
     if CHECKPOINT_REVISION not in args.checkpoint.resolve().parts:
         raise RuntimeError(
@@ -480,6 +503,87 @@ def _git_dirty(path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def _git_state(path: Path) -> dict[str, Any]:
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    diff = subprocess.run(
+        ["git", "diff", "--binary", "HEAD"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    ).stdout
+    digest = hashlib.sha256()
+    digest.update(status.encode("utf-8"))
+    digest.update(diff)
+    for line in status.splitlines():
+        if not line.startswith("?? "):
+            continue
+        relative = line[3:]
+        untracked = path / relative
+        if untracked.is_file():
+            digest.update(relative.encode("utf-8"))
+            with untracked.open("rb") as file:
+                for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    return {
+        "revision": _git_revision(path),
+        "dirty": bool(status.strip()),
+        "worktree_sha256": digest.hexdigest(),
+    }
+
+
+def _evidence_code_hashes(project_root: Path) -> dict[str, str | None]:
+    directory = project_root / "embodied_silent_failures" / "evidence_graph"
+    paths = [
+        project_root / "embodied_silent_failures" / name
+        for name in ("faults.py", "run_openvla.py", "score_safe.py")
+    ]
+    paths.extend(sorted(directory.glob("*.py")))
+    return {
+        str(path.relative_to(project_root)): _sha256(path)
+        for path in paths
+    }
+
+
+def _checkpoint_manifest(checkpoint: Path) -> dict[str, Any]:
+    entries = []
+    for path in sorted(item for item in checkpoint.rglob("*") if item.is_file()):
+        resolved = path.resolve()
+        entries.append(
+            {
+                "path": str(path.relative_to(checkpoint)),
+                "size": path.stat().st_size,
+                "resolved_name": resolved.name,
+            }
+        )
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return {
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "file_count": len(entries),
+        "basis": "relative path, byte size, and resolved Hugging Face blob name",
+    }
+
+
+def _write_evidence_saturation(evidence_dir: Path) -> None:
+    composition_paths = sorted(evidence_dir.rglob("composition.json"))
+    compositions = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in composition_paths
+    ]
+    saturation = summarize_saturation(compositions)
+    saturation["composition_files"] = [
+        str(path.relative_to(evidence_dir)) for path in composition_paths
+    ]
+    write_json_atomic(evidence_dir / "saturation.json", saturation)
+
+
 def _run_metadata(
     args: Arguments,
     runtime: Runtime,
@@ -513,9 +617,17 @@ def _run_metadata(
     config["paired_clean_dirs"] = [
         str(path.resolve()) for path in args.paired_clean_dirs
     ]
+    config["evidence_dir"] = (
+        str(args.evidence_dir.resolve()) if args.evidence_dir else None
+    )
     config.pop("resume")
 
     project_root = Path(__file__).resolve().parents[1]
+    repository_states = {
+        "experiment_code": _git_state(project_root),
+        "openvla": _git_state(args.openvla_root),
+        "libero": _git_state(args.libero_root),
+    }
     return {
         "schema_version": 1,
         "condition": condition,
@@ -528,12 +640,15 @@ def _run_metadata(
         ],
         "fault_model": fault_model,
         "upstream_revisions": {
-            "experiment_code": _git_revision(project_root),
-            "experiment_code_dirty": _git_dirty(project_root),
+            "experiment_code": repository_states["experiment_code"]["revision"],
+            "experiment_code_dirty": repository_states["experiment_code"]["dirty"],
             "openvla": OPENVLA_REVISION,
             "libero": LIBERO_REVISION,
             "checkpoint": CHECKPOINT_REVISION,
         },
+        "repository_states": repository_states,
+        "evidence_graph_code_sha256": _evidence_code_hashes(project_root),
+        "checkpoint_manifest": _checkpoint_manifest(args.checkpoint),
         "checkpoint_files": {
             "config.json": _sha256(args.checkpoint / "config.json"),
             "dataset_statistics.json": _sha256(
@@ -736,6 +851,7 @@ def _run_trial(
     fault_injector: TransientActivationFault | None,
     clean_trace: CleanTrace | None,
     stale_image_spec: StaleImageSpec | None,
+    evidence: RolloutEvidence | None = None,
 ) -> dict[str, Any]:
     runtime.torch.cuda.reset_peak_memory_stats()
     rollout_started = time.perf_counter()
@@ -789,13 +905,41 @@ def _run_trial(
             row["fault/injected"] = False
             action = replay_action(runtime.np, clean_trace, policy_step)
 
+            if evidence is not None:
+                evidence.begin_step(
+                    policy_step,
+                    observation,
+                    image,
+                    image,
+                    policy_step,
+                    None,
+                    policy_replayed=True,
+                )
+                action = evidence.replayed_evidence(
+                    policy_step,
+                    action,
+                    runtime.torch.as_tensor(clean_trace.hidden_states[policy_step, -1, :]),
+                )
+
             simulator_started = time.perf_counter()
-            observation, reward, done, _ = env.step(action.tolist())
+            if evidence is not None:
+                observation, reward, done, _ = evidence.environment_step(
+                    env, action, policy_step, policy_replayed=True
+                )
+            else:
+                observation, reward, done, _ = env.step(action.tolist())
             simulator_seconds.append(time.perf_counter() - simulator_started)
             row["timing/simulator_seconds"] = simulator_seconds[-1]
             row["environment/reward"] = reward
             row["environment/done"] = bool(done)
             rows.append(row)
+            if evidence is not None:
+                evidence.finish_step(
+                    policy_step,
+                    fault_applied=False,
+                    reward=reward,
+                    done=bool(done),
+                )
             replayed_steps += 1
             if done:
                 raise CounterfactualReplayTerminated(
@@ -831,6 +975,22 @@ def _run_trial(
         )
         policy_observation = {"full_image": policy_image, "state": state}
 
+        intervention = None
+        source_step = policy_step
+        if stale_image_spec is not None and policy_step == stale_image_spec.policy_step:
+            intervention = image_intervention_record
+            if args.image_input_mode == "stale":
+                source_step = stale_image_spec.source_policy_step
+        if evidence is not None:
+            evidence.begin_step(
+                policy_step,
+                observation,
+                image,
+                policy_image,
+                source_step,
+                intervention,
+            )
+
         runtime.torch.cuda.synchronize()
         inference_started = time.perf_counter()
         fault_context = (
@@ -838,13 +998,25 @@ def _run_trial(
             if fault_injector is not None
             else nullcontext()
         )
+        evidence_model = (
+            evidence.policy_model(model, policy_step)
+            if evidence is not None
+            else model
+        )
+        evidence_processor = (
+            evidence.processor(
+                processor, policy_image, task_description, policy_step
+            )
+            if evidence is not None
+            else processor
+        )
         with runtime.torch.inference_mode(), fault_context:
             raw_actions, generated = runtime.get_action(
                 model_config,
-                model,
+                evidence_model,
                 policy_observation,
                 task_description,
-                processor=processor,
+                processor=evidence_processor,
                 n_samples=1,
             )
         runtime.torch.cuda.synchronize()
@@ -853,8 +1025,19 @@ def _run_trial(
         raw_action = runtime.np.asarray(raw_actions).copy()
         if raw_action.shape != (7,):
             raise ValueError(f"unexpected OpenVLA action shape: {raw_action.shape}")
-        action = runtime.normalize_gripper_action(raw_action.copy(), binarize=True)
-        action = runtime.invert_gripper_action(action)
+        if evidence is not None:
+            evidence.policy_outputs(
+                model,
+                generated,
+                raw_actions,
+                model_config.unnorm_key,
+                policy_step,
+                runtime.torch,
+            )
+            action = evidence.command(runtime, raw_action, policy_step)
+        else:
+            action = runtime.normalize_gripper_action(raw_action.copy(), binarize=True)
+            action = runtime.invert_gripper_action(action)
 
         hidden_history.append(_extract_hidden_states(runtime, generated))
         observation_history.append(_numeric_observation(runtime, observation))
@@ -894,12 +1077,24 @@ def _run_trial(
             row["fault/injected"] = policy_step == stale_image_spec.policy_step
 
         simulator_started = time.perf_counter()
-        observation, reward, done, _ = env.step(action.tolist())
+        if evidence is not None:
+            observation, reward, done, _ = evidence.environment_step(
+                env, action, policy_step
+            )
+        else:
+            observation, reward, done, _ = env.step(action.tolist())
         simulator_seconds.append(time.perf_counter() - simulator_started)
         row["timing/simulator_seconds"] = simulator_seconds[-1]
         row["environment/reward"] = reward
         row["environment/done"] = bool(done)
         rows.append({key: _python_value(runtime, value) for key, value in row.items()})
+        if evidence is not None:
+            evidence.finish_step(
+                policy_step,
+                fault_applied=bool(row.get("fault/injected", False)),
+                reward=reward,
+                done=bool(done),
+            )
 
         if done:
             success = True
@@ -914,6 +1109,7 @@ def _run_trial(
             raise RuntimeError("image intervention was never applied")
         fault_record = image_intervention_record
     condition = run_condition if fault_record else "clean"
+    evidence_result = None
 
     stem = safe_stem(trial, success)
     csv_path = args.output_dir / f"{stem}.csv"
@@ -949,6 +1145,15 @@ def _run_trial(
         },
     )
     artifact_seconds = time.perf_counter() - artifact_started
+    if evidence is not None:
+        evidence_result = evidence.close(
+            success=success,
+            policy_steps=len(rows),
+            fault=fault_record,
+        )
+        evidence_result["directory_relative_to_run"] = os.path.relpath(
+            evidence.output_dir, args.output_dir
+        )
 
     result = {
         "schema_version": 1,
@@ -982,6 +1187,7 @@ def _run_trial(
             if clean_trace is not None
             else {"enabled": False}
         ),
+        "evidence_graph": evidence_result,
         "files": {
             "csv": csv_path.name,
             "pickle": pickle_path.name,
@@ -1116,6 +1322,8 @@ def main() -> None:
             pending.append((index, trial))
 
     if not pending:
+        if args.evidence_dir is not None:
+            _write_evidence_saturation(args.evidence_dir)
         print("run complete: no new trials")
         return
 
@@ -1179,6 +1387,52 @@ def main() -> None:
                     fault_injector.install(model)
                 try:
                     try:
+                        evidence = None
+                        if args.evidence_dir is not None:
+                            traced_steps = set(args.evidence_trace_steps)
+                            if not traced_steps:
+                                intervention = (
+                                    trial_fault_spec.policy_step
+                                    if trial_fault_spec is not None
+                                    else (
+                                        trial_stale_image_spec.policy_step
+                                        if trial_stale_image_spec is not None
+                                        else 0
+                                    )
+                                )
+                                traced_steps.add(intervention)
+                            evidence_output = (
+                                args.evidence_dir
+                                / f"task{trial.task_id}--ep{trial.episode_index}"
+                            )
+                            prepare_evidence_output(evidence_output)
+                            evidence = RolloutEvidence(
+                                evidence_output,
+                                {
+                                    "schema_version": 2,
+                                    "scope": "actual_openvla_rollout_with_selected_operator_traces",
+                                    "condition": run_condition,
+                                    "task_suite": args.task_suite,
+                                    "task_id": trial.task_id,
+                                    "episode_index": trial.episode_index,
+                                    "trial_seed": trial_seed,
+                                    "traced_steps": sorted(traced_steps),
+                                    "upstream_revisions": metadata["upstream_revisions"],
+                                    "repository_states": metadata["repository_states"],
+                                    "evidence_graph_code_sha256": metadata[
+                                        "evidence_graph_code_sha256"
+                                    ],
+                                    "checkpoint_manifest": metadata[
+                                        "checkpoint_manifest"
+                                    ],
+                                    "checkpoint_files": metadata["checkpoint_files"],
+                                },
+                                traced_steps,
+                            )
+                            if fault_injector is not None:
+                                fault_injector.set_observer(
+                                    evidence.activation_fault_observer
+                                )
                         result = _run_trial(
                             args,
                             runtime,
@@ -1195,8 +1449,11 @@ def main() -> None:
                             fault_injector,
                             clean_trace,
                             trial_stale_image_spec,
+                            evidence,
                         )
                     except CounterfactualReplayInvalid as error:
+                        if evidence is not None:
+                            evidence.abort(error.reason)
                         intervention_step = (
                             trial_fault_spec.policy_step
                             if trial_fault_spec is not None
@@ -1229,6 +1486,10 @@ def main() -> None:
                             f"{trial.episode_index}: {error}"
                         )
                         continue
+                    except BaseException:
+                        if evidence is not None:
+                            evidence.abort("rollout_execution_error")
+                        raise
                 finally:
                     if fault_injector is not None:
                         fault_injector.close()
@@ -1252,6 +1513,8 @@ def main() -> None:
             f"run complete: {completed} new trials{success_summary}, "
             f"{excluded} excluded"
         )
+    if args.evidence_dir is not None:
+        _write_evidence_saturation(args.evidence_dir)
 
 
 if __name__ == "__main__":

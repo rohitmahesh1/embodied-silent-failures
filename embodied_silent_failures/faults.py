@@ -139,10 +139,14 @@ class TransientActivationFault:
         self._policy_step: int | None = None
         self._generation_step = 0
         self._record: dict[str, Any] | None = None
+        self._observer: Any = None
 
     @property
     def record(self) -> dict[str, Any] | None:
         return self._record
+
+    def set_observer(self, observer: Any) -> None:
+        self._observer = observer
 
     def install(self, model: Any) -> None:
         if self._handle is not None:
@@ -221,8 +225,18 @@ class TransientActivationFault:
             raise RuntimeError("fault hook ran outside a trial")
 
         tensor = output if isinstance(output, self._torch.Tensor) else output[0]
-        faulted, record = self._flip(tensor, self._trial_seed)
+        # PyTorch 2.2's dispatcher guard keeps the injector's clone/XOR out of
+        # the policy trace; the observer below records the fault boundary itself.
+        disable_dispatch = getattr(
+            getattr(self._torch, "_C", None), "_DisableTorchDispatch", None
+        )
+        if disable_dispatch is None:
+            raise RuntimeError("pinned PyTorch has no dispatch guard for fault injection")
+        with disable_dispatch():
+            faulted, record = self._flip(tensor, self._trial_seed)
         self._record = record
+        if self._observer is not None:
+            self._observer(tensor, faulted, record)
         return _replace_first_tensor(self._torch, output, faulted)
 
     def _flip(self, tensor: Any, trial_seed: int) -> tuple[Any, dict[str, Any]]:

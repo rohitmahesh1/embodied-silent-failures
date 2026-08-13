@@ -67,6 +67,29 @@ def prepare_trial(
             raise FileNotFoundError(
                 f"completion marker references missing artifacts {missing}: {marker}"
             )
+        evidence = result.get("evidence_graph")
+        if evidence is not None:
+            if not isinstance(evidence, dict):
+                raise ValueError(f"completion marker has invalid evidence metadata: {marker}")
+            evidence_dir = Path(str(evidence.get("directory", "")))
+            relative = evidence.get("directory_relative_to_run")
+            if not evidence_dir.is_dir() and isinstance(relative, str):
+                evidence_dir = (output_dir / relative).resolve()
+            evidence_files = (
+                "raw.jsonl",
+                "annotations.json",
+                "graph.json",
+                "audit.json",
+                "composition.json",
+            )
+            missing_evidence = [
+                name for name in evidence_files if not (evidence_dir / name).is_file()
+            ]
+            if missing_evidence:
+                raise FileNotFoundError(
+                    "completion marker references missing evidence artifacts "
+                    f"{missing_evidence}: {marker}"
+                )
         if exclusion_path(output_dir, trial).exists():
             raise ValueError(f"trial has both completion and exclusion markers: {trial}")
         return "complete"

@@ -106,6 +106,49 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 prepare_trial(output_dir, trial, resume=True)
 
+    def test_prepare_trial_requires_referenced_evidence_artifacts(self) -> None:
+        trial = Trial(task_id=1, episode_index=9)
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "run"
+            output_dir.mkdir()
+            csv_path = output_dir / "task1--ep9--succ0.csv"
+            pickle_path = output_dir / "task1--ep9--succ0.pkl"
+            csv_path.touch()
+            pickle_path.touch()
+            evidence_dir = Path(directory) / "evidence" / "task1--ep9"
+            evidence_dir.mkdir(parents=True)
+            for name in (
+                "raw.jsonl",
+                "annotations.json",
+                "graph.json",
+                "audit.json",
+                "composition.json",
+            ):
+                (evidence_dir / name).touch()
+            marker = completion_path(output_dir, trial)
+            write_json_atomic(
+                marker,
+                {
+                    "status": "complete",
+                    "task_id": 1,
+                    "episode_index": 9,
+                    "files": {
+                        "csv": csv_path.name,
+                        "pickle": pickle_path.name,
+                        "video": None,
+                    },
+                    "evidence_graph": {
+                        "directory": "/unavailable/original/path",
+                        "directory_relative_to_run": "../evidence/task1--ep9",
+                    },
+                },
+            )
+
+            self.assertEqual(prepare_trial(output_dir, trial, resume=True), "complete")
+            (evidence_dir / "audit.json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                prepare_trial(output_dir, trial, resume=True)
+
     def test_atomic_json_is_complete_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "value.json"
