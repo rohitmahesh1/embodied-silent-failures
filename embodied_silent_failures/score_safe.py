@@ -411,6 +411,7 @@ def main() -> None:
                 }
                 for step, score in enumerate(values)
             ],
+            monitor_id="safe",
         )
     print(
         json.dumps(

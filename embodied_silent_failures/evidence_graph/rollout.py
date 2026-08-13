@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,8 @@ def attach_monitor_timeline(
     evidence_dir: Path,
     monitor: dict[str, Any],
     timeline: list[dict[str, Any]],
+    *,
+    monitor_id: str | None = None,
 ) -> dict[str, Any]:
     """Attach post-hoc monitor results without changing the runtime trace."""
     composition_path = evidence_dir / "composition.json"
@@ -54,13 +57,25 @@ def attach_monitor_timeline(
     policy_steps = int(composition["policy_steps"])
     if [int(item["policy_step"]) for item in timeline] != list(range(policy_steps)):
         raise ValueError("monitor timeline must contain every policy step in order")
+    if monitor_id is not None and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", monitor_id) is None:
+        raise ValueError("monitor ID must use lowercase letters, digits, underscores, or hyphens")
     attachment = {
-        "schema_version": 1,
+        "schema_version": 2 if monitor_id is not None else 1,
         "evidence_composition_sha256": _file_sha256(composition_path),
+        **({"monitor_id": monitor_id} if monitor_id is not None else {}),
         "monitor": monitor,
         "timeline": timeline,
     }
-    path = evidence_dir / "monitor-timeline.json"
+    path = (
+        evidence_dir / "monitor-timelines" / f"{monitor_id}.json"
+        if monitor_id is not None
+        else evidence_dir / "monitor-timeline.json"
+    )
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != attachment:
+            raise FileExistsError(f"monitor attachment already exists with different data: {path}")
+        return existing
     write_json_atomic(path, attachment)
     return attachment
 

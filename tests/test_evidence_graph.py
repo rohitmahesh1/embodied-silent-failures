@@ -23,6 +23,15 @@ from embodied_silent_failures.evidence_graph.safe import (
     contract_issues as safe_contract_issues,
     operator_annotations as safe_annotations,
 )
+from embodied_silent_failures.evidence_graph.qwen import (
+    REQUIRED_ENDPOINTS as QWEN_ENDPOINTS,
+    contract_issues as qwen_contract_issues,
+    parse_response as parse_qwen_response,
+    record_decision as record_qwen_decision,
+    record_model_response as record_qwen_response,
+    record_monitor_input as record_qwen_input,
+    record_observation_frame as record_qwen_frame,
+)
 from embodied_silent_failures.evidence_graph.torch_trace import (
     contract_issues as torch_trace_contract_issues,
 )
@@ -918,6 +927,102 @@ class EvidenceGraphTests(unittest.TestCase):
         self.assertEqual(attachment["monitor"]["kind"], "test")
         self.assertFalse(updated["monitor_timeline_recorded_inline"])
         self.assertTrue(attachment_exists)
+
+    def test_named_monitor_attachments_coexist_and_are_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "composition.json").write_text(
+                __import__("json").dumps({"schema_version": 1, "policy_steps": 1}),
+                encoding="utf-8",
+            )
+            safe = attach_monitor_timeline(
+                root,
+                {"kind": "safe_mlp"},
+                [{"policy_step": 0, "score": 0.2}],
+                monitor_id="safe",
+            )
+            qwen = attach_monitor_timeline(
+                root,
+                {"kind": "qwen3_vl"},
+                [{"policy_step": 0, "alarm": False}],
+                monitor_id="qwen",
+            )
+            repeated = attach_monitor_timeline(
+                root,
+                {"kind": "qwen3_vl"},
+                [{"policy_step": 0, "alarm": False}],
+                monitor_id="qwen",
+            )
+            with self.assertRaises(FileExistsError):
+                attach_monitor_timeline(
+                    root,
+                    {"kind": "qwen3_vl"},
+                    [{"policy_step": 0, "alarm": True}],
+                    monitor_id="qwen",
+                )
+
+            self.assertTrue((root / "monitor-timelines" / "safe.json").is_file())
+            self.assertTrue((root / "monitor-timelines" / "qwen.json").is_file())
+        self.assertEqual(safe["monitor_id"], "safe")
+        self.assertEqual(qwen, repeated)
+
+    def test_qwen_adapter_builds_audited_observation_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "raw.jsonl"
+            first = Value("frame-0")
+            current = Value("frame-2")
+            with Recorder(path, {"scope": "qwen-test"}) as recorder:
+                record_qwen_frame(
+                    recorder,
+                    first,
+                    policy_step=0,
+                    frame_sha256="a" * 64,
+                    run_sha256="d" * 64,
+                    video_sha256="c" * 64,
+                )
+                record_qwen_frame(
+                    recorder,
+                    current,
+                    policy_step=2,
+                    frame_sha256="b" * 64,
+                    run_sha256="d" * 64,
+                    video_sha256="c" * 64,
+                )
+                request = record_qwen_input(
+                    recorder,
+                    [first, current],
+                    instruction="put the cup away",
+                    frame_steps=[0, 2],
+                    frame_sha256=["a" * 64, "b" * 64],
+                    history_frames=2,
+                )
+                raw = record_qwen_response(
+                    recorder,
+                    request,
+                    '{"failure_now":0,"reason":"on track"}',
+                    model_basis="code:qwen-test@abc:pinned-model-and-processor",
+                )
+                record_qwen_decision(
+                    recorder,
+                    raw,
+                    parse_qwen_response('{"failure_now":0,"reason":"on track"}'),
+                    policy_step=2,
+                )
+            events = read_events(path)
+            graph = reduce_graph(events, recorder.annotations)
+            audit = audit_graph(
+                events,
+                recorder.annotations,
+                graph,
+                QWEN_ENDPOINTS,
+                contract_issues=qwen_contract_issues(events),
+            )
+
+        self.assertTrue(audit["passed"], audit)
+        regions = {region["name"] for region in graph["regions"]}
+        self.assertIn("qwen_observation_evidence", regions)
+        self.assertIn("qwen_private_compute", regions)
+        self.assertIn("qwen_alarm", regions)
 
     def test_boundary_only_rollout_builds_an_audited_composition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

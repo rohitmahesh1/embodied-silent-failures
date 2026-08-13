@@ -541,7 +541,13 @@ def _evidence_code_hashes(project_root: Path) -> dict[str, str | None]:
     directory = project_root / "embodied_silent_failures" / "evidence_graph"
     paths = [
         project_root / "embodied_silent_failures" / name
-        for name in ("faults.py", "run_openvla.py", "score_safe.py")
+        for name in (
+            "faults.py",
+            "qwen_artifacts.py",
+            "run_openvla.py",
+            "score_qwen.py",
+            "score_safe.py",
+        )
     ]
     paths.extend(sorted(directory.glob("*.py")))
     return {
