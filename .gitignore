@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 .venv/
 outputs/
+viewer/node_modules/
+viewer/dist/
+.wrangler/
