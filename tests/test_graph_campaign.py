@@ -139,7 +139,17 @@ class GraphCampaignTests(unittest.TestCase):
             output = root / "reference-output"
             manifests = job / "manifests"
             manifests.mkdir(parents=True)
+            decoy_ordinary = {"task_id": 0, "episode_index": 42}
             ordinary = {"task_id": 0, "episode_index": 27}
+            decoy_pair = {
+                "task_id": 0,
+                "episode_index": 6,
+                "stale_image": {
+                    "policy_step": 34,
+                    "image_lag": 1,
+                    "source_policy_step": 33,
+                },
+            }
             pair = {
                 "task_id": 0,
                 "episode_index": 0,
@@ -150,11 +160,13 @@ class GraphCampaignTests(unittest.TestCase):
                 },
             }
             (manifests / "census-wave-0.json").write_text(
-                json.dumps({"schema_version": 1, "trials": [ordinary]}),
+                json.dumps(
+                    {"schema_version": 1, "trials": [decoy_ordinary, ordinary]}
+                ),
                 encoding="utf-8",
             )
             (manifests / "intervention-task-0.json").write_text(
-                json.dumps({"schema_version": 1, "trials": [pair]}),
+                json.dumps({"schema_version": 1, "trials": [decoy_pair, pair]}),
                 encoding="utf-8",
             )
             campaign = {
@@ -188,24 +200,52 @@ class GraphCampaignTests(unittest.TestCase):
                 "control": ("intervention-task-0-current-control", pair),
                 "stale": ("intervention-task-0-stale", pair),
             }
-            for mode, (stage, trial) in identities.items():
-                graph = (
+            decoys = {
+                "ordinary": ("census-wave-0", decoy_ordinary),
+                "control": ("intervention-task-0-current-control", decoy_pair),
+                "stale": ("intervention-task-0-stale", decoy_pair),
+            }
+            for mode, (stage, trial) in decoys.items():
+                evidence = (
                     output
                     / "evidence"
                     / stage
                     / f"task{trial['task_id']}--ep{trial['episode_index']}"
-                    / "graph.json"
                 )
-                graph.parent.mkdir(parents=True)
+                evidence.mkdir(parents=True)
+                (evidence / "graph.json").write_text(
+                    json.dumps({"mode": mode, "decoy": True}), encoding="utf-8"
+                )
+                (evidence / "audit.json").write_text(
+                    json.dumps({"passed": True, "decoy": True}), encoding="utf-8"
+                )
+            for mode, (stage, trial) in identities.items():
+                evidence = (
+                    output
+                    / "evidence"
+                    / stage
+                    / f"task{trial['task_id']}--ep{trial['episode_index']}"
+                )
+                graph = evidence / "graph.json"
+                audit = evidence / "audit.json"
+                evidence.mkdir(parents=True)
                 graph.write_text(json.dumps({"mode": mode}), encoding="utf-8")
-                graph_hashes[mode] = file_sha256(graph)
+                audit.write_text(json.dumps({"passed": True}), encoding="utf-8")
+                graph_hashes[mode] = {
+                    "graph": file_sha256(graph),
+                    "audit": file_sha256(audit),
+                }
             viewer = root / "safe-viewer.json"
             viewer.write_text(
                 json.dumps(
                     {
                         "sources": [
-                            {"mode": mode, "graphSha256": digest}
-                            for mode, digest in graph_hashes.items()
+                            {
+                                "mode": mode,
+                                "graphSha256": digests["graph"],
+                                "auditSha256": digests["audit"],
+                            }
+                            for mode, digests in graph_hashes.items()
                         ]
                     }
                 ),
@@ -220,7 +260,14 @@ class GraphCampaignTests(unittest.TestCase):
             )
 
         self.assertEqual(result["selection_basis"], SELECTION_BASIS)
-        self.assertEqual(result["reference_graph_sha256"], graph_hashes)
+        self.assertEqual(
+            result["reference_graph_sha256"],
+            {mode: digests["graph"] for mode, digests in graph_hashes.items()},
+        )
+        self.assertEqual(
+            result["reference_audit_sha256"],
+            {mode: digests["audit"] for mode, digests in graph_hashes.items()},
+        )
         self.assertEqual(
             result["reference_trials"],
             {

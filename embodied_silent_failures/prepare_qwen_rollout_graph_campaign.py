@@ -48,9 +48,7 @@ def _manifest_path(reference: Path, value: str) -> Path:
     return candidate
 
 
-def _representatives(
-    reference: Path, campaign: dict[str, Any]
-) -> dict[str, dict[str, Any]]:
+def _reference_stages(campaign: dict[str, Any]) -> dict[str, dict[str, Any]]:
     stages = campaign.get("stages", [])
     ordinary_stage = next(
         (stage for stage in stages if stage.get("name") == "census-wave-0"), None
@@ -78,51 +76,68 @@ def _representatives(
     )
     if ordinary_stage is None or stale_stage is None or control_stage is None:
         raise ValueError("reference campaign has no ordinary and stale representatives")
-    ordinary_manifest = _load(
-        _manifest_path(reference, str(ordinary_stage["manifest"]))
-    )
-    pair_manifest = _load(_manifest_path(reference, str(stale_stage["manifest"])))
-    ordinary = ordinary_manifest.get("trials", [])[0]
-    pair = pair_manifest.get("trials", [])[0]
-    if not isinstance(ordinary, dict) or not isinstance(pair, dict):
-        raise ValueError("reference representative manifests are empty")
     return {
-        "ordinary": {"stage": ordinary_stage["name"], "trial": ordinary},
-        "control": {
-            "stage": control_stage["name"],
-            "trial": pair,
-        },
-        "stale": {"stage": stale_stage["name"], "trial": pair},
+        "ordinary": ordinary_stage,
+        "control": control_stage,
+        "stale": stale_stage,
     }
 
 
-def _verify_published_graphs(
+def _published_sources(viewer: dict[str, Any]) -> dict[str, dict[str, str]]:
+    published = {
+        source["mode"]: {
+            "graph": source["graphSha256"],
+            "audit": source["auditSha256"],
+        }
+        for source in viewer.get("sources", [])
+        if source.get("mode") in {"ordinary", "control", "stale"}
+    }
+    if set(published) != {"ordinary", "control", "stale"}:
+        raise ValueError("SAFE viewer does not identify all three source modes")
+    return published
+
+
+def _representatives(
+    reference: Path,
     reference_output: Path,
     viewer: dict[str, Any],
-    representatives: dict[str, dict[str, Any]],
-) -> dict[str, str]:
-    published = {
-        source["mode"]: source["graphSha256"]
-        for source in viewer.get("sources", [])
-        if source.get("mode") in representatives
-    }
-    if set(published) != set(representatives):
-        raise ValueError("SAFE viewer does not identify all three source modes")
-    hashes = {}
-    for mode, record in representatives.items():
-        trial = record["trial"]
-        graph = (
-            reference_output
-            / "evidence"
-            / record["stage"]
-            / f"task{trial['task_id']}--ep{trial['episode_index']}"
-            / "graph.json"
-        )
-        digest = file_sha256(graph)
-        if digest != published[mode]:
-            raise ValueError(f"{mode} reference graph differs from the SAFE viewer")
-        hashes[mode] = digest
-    return hashes
+    campaign: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    stages = _reference_stages(campaign)
+    published = _published_sources(viewer)
+    representatives = {}
+    for mode, stage in stages.items():
+        manifest = _load(_manifest_path(reference, str(stage["manifest"])))
+        matches = []
+        for trial in manifest.get("trials", []):
+            if not isinstance(trial, dict):
+                raise ValueError(f"{mode} reference manifest has a non-object trial")
+            evidence = (
+                reference_output
+                / "evidence"
+                / stage["name"]
+                / f"task{trial['task_id']}--ep{trial['episode_index']}"
+            )
+            graph = evidence / "graph.json"
+            audit = evidence / "audit.json"
+            if not graph.is_file() or not audit.is_file():
+                continue
+            if (
+                file_sha256(graph) == published[mode]["graph"]
+                and file_sha256(audit) == published[mode]["audit"]
+            ):
+                matches.append(trial)
+        if len(matches) != 1:
+            raise ValueError(
+                f"published SAFE {mode} source matched {len(matches)} frozen trials"
+            )
+        representatives[mode] = {
+            "stage": stage["name"],
+            "trial": matches[0],
+            "graph_sha256": published[mode]["graph"],
+            "audit_sha256": published[mode]["audit"],
+        }
+    return representatives
 
 
 def prepare_campaign(
@@ -139,9 +154,8 @@ def prepare_campaign(
     output_dir.mkdir(parents=True, exist_ok=True)
     campaign = _load(reference_campaign_dir / "campaign.json")
     viewer = _load(safe_viewer_data.resolve())
-    representatives = _representatives(reference_campaign_dir, campaign)
-    graph_hashes = _verify_published_graphs(
-        reference_output_root, viewer, representatives
+    representatives = _representatives(
+        reference_campaign_dir, reference_output_root, viewer, campaign
     )
 
     ordinary_manifest = output_dir / "ordinary.json"
@@ -201,7 +215,14 @@ def prepare_campaign(
         ),
         "reference_output_root": str(reference_output_root),
         "safe_viewer_data_sha256": file_sha256(safe_viewer_data.resolve()),
-        "reference_graph_sha256": graph_hashes,
+        "reference_graph_sha256": {
+            mode: record["graph_sha256"]
+            for mode, record in representatives.items()
+        },
+        "reference_audit_sha256": {
+            mode: record["audit_sha256"]
+            for mode, record in representatives.items()
+        },
         "reference_trials": {
             mode: {
                 "task_id": int(record["trial"]["task_id"]),
