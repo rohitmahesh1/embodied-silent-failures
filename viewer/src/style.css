@@ -493,6 +493,17 @@ button {
   background: #a8b2af;
 }
 
+.empty-inspector .campaign-note {
+  margin-top: 9px;
+  color: #6b7775;
+  font-size: 10px;
+}
+
+.campaign-note strong {
+  color: var(--ink);
+  font-weight: 680;
+}
+
 .inspector-title {
   padding: 22px 20px 18px;
   border-bottom: 1px solid var(--line);

@@ -31,7 +31,7 @@ export interface EvidenceEdge {
 }
 
 export interface SourceArtifact {
-  mode: Mode;
+  mode?: Mode;
   label: string;
   graphSha256: string;
   auditSha256: string;
@@ -40,11 +40,40 @@ export interface SourceArtifact {
   edgeCount: number;
 }
 
+export interface CoverageSummary {
+  discoveryItems: number;
+  totalItems: number;
+  novelHoldouts: number;
+  zeroNoveltyUpper95: number | null;
+}
+
+export interface TraceCampaign {
+  basis: string;
+  selectionSha256: string;
+  campaignSha256: string;
+  manifestSha256: string;
+  representativeGraphSha256: string;
+  representativeAuditSha256: string;
+  traceRevision: string;
+  totalQueries: number;
+  discoveryQueries: number;
+  holdoutQueries: number;
+  failedAttempts: number;
+  conditions: Record<Mode, number>;
+  coverage: {
+    regions: CoverageSummary;
+    edges: CoverageSummary;
+    operators: CoverageSummary;
+    processor_shapes: CoverageSummary;
+  };
+}
+
 export interface GraphDataset {
   schemaVersion: number;
   view?: "safe" | "qwen";
   trustBoundary: string;
   sources: SourceArtifact[];
+  traceCampaign?: TraceCampaign;
   totals: {
     regions: number;
     edges: number;

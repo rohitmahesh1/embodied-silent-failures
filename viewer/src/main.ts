@@ -180,6 +180,9 @@ function displayLabel(region: Region): string {
   const statePath = region.semanticKey.split("/state/")[1];
   if (statePath) return stateIdentity(base, statePath);
 
+  const qwenModule = region.semanticKey.match(/^qwen_model\/module\/(.+)$/);
+  if (qwenModule) return qwenIdentity(qwenModule[1]);
+
   const detail = region.semanticKey.split("/")[1];
   if (detail) return `${base} · ${titleCase(detail)}`;
   if ((regionNameCounts.get(region.name) ?? 0) === 1) return base;
@@ -195,6 +198,8 @@ function pathLabel(region: Region): string {
   const base = titleCase(region.name);
   const statePath = region.semanticKey.split("/state/")[1];
   if (statePath) return stateIdentity(base, statePath);
+  const qwenModule = region.semanticKey.match(/^qwen_model\/module\/(.+)$/);
+  if (qwenModule) return qwenIdentity(qwenModule[1]);
   const detail = region.semanticKey.split("/")[1];
   if (compactPathQuery.matches) {
     if (detail) return titleCase(detail);
@@ -216,18 +221,24 @@ const componentNames: Record<string, string> = {
   "mlp.fc1": "MLP input",
   "mlp.fc2": "MLP output",
   "mlp.gate_proj": "MLP gate projection",
+  "mlp.linear_fc1": "MLP input",
+  "mlp.linear_fc2": "MLP output",
   "mlp.up_proj": "MLP up projection",
   "norm1": "normalization 1",
   "norm2": "normalization 2",
   "post_attention_layernorm": "post-attention normalization",
   "self_attn.k_proj": "attention key projection",
+  "self_attn.k_norm": "attention key normalization",
   "self_attn.o_proj": "attention output projection",
   "self_attn.q_proj": "attention query projection",
+  "self_attn.q_norm": "attention query normalization",
   "self_attn.rotary_emb": "rotary position encoding",
   "self_attn.v_proj": "attention value projection",
 };
 
 function stateIdentity(base: string, path: string): string {
+  if (path.startsWith("qwen_model.")) return qwenIdentity(path);
+
   const languageLayer = path.match(/^policy\.language_model\.model\.layers\.(\d+)\.(.+)$/);
   if (languageLayer) {
     return `${base} · Layer ${languageLayer[1]} · ${componentNames[languageLayer[2]] ?? naturalizePath(languageLayer[2])}`;
@@ -240,6 +251,50 @@ function stateIdentity(base: string, path: string): string {
   }
 
   return `${base} · ${naturalizePath(path)}`;
+}
+
+function qwenIdentity(path: string): string {
+  const languageLayer = path.match(/^qwen_model\.model\.language_model\.layers\.(\d+)(?:\.(.+))?$/);
+  if (languageLayer) {
+    const detail = languageLayer[2];
+    return detail
+      ? `Language model · Layer ${languageLayer[1]} · ${componentNames[detail] ?? naturalizePath(detail)}`
+      : `Language model · Layer ${languageLayer[1]}`;
+  }
+
+  const visionBlock = path.match(/^qwen_model\.model\.visual\.blocks\.(\d+)(?:\.(.+))?$/);
+  if (visionBlock) {
+    const detail = visionBlock[2];
+    return detail
+      ? `Vision encoder · Block ${visionBlock[1]} · ${componentNames[detail] ?? naturalizePath(detail)}`
+      : `Vision encoder · Block ${visionBlock[1]}`;
+  }
+
+  const deepstack = path.match(/^qwen_model\.model\.visual\.deepstack_merger_list\.(\d+)(?:\.(.+))?$/);
+  if (deepstack) {
+    const detail = deepstack[2];
+    return detail
+      ? `Vision encoder · Deepstack merger ${deepstack[1]} · ${naturalizePath(detail)}`
+      : `Vision encoder · Deepstack merger ${deepstack[1]}`;
+  }
+
+  const names: Array<[string, string]> = [
+    ["qwen_model.model.language_model.embed_tokens", "Language model · Token embedding"],
+    ["qwen_model.model.language_model.rotary_emb", "Language model · Rotary position encoding"],
+    ["qwen_model.model.language_model.norm", "Language model · Output normalization"],
+    ["qwen_model.model.language_model", "Language model"],
+    ["qwen_model.model.visual.patch_embed", "Vision encoder · Patch embedding"],
+    ["qwen_model.model.visual.merger", "Vision encoder · Merger"],
+    ["qwen_model.model.visual", "Vision encoder"],
+    ["qwen_model.lm_head", "Response-token output"],
+    ["qwen_model.model", "Qwen model"],
+    ["qwen_model", "Qwen model root"],
+  ];
+  for (const [prefix, label] of names) {
+    if (path === prefix) return label;
+    if (path.startsWith(`${prefix}.`)) return `${label} · ${naturalizePath(path.slice(prefix.length + 1))}`;
+  }
+  return naturalizePath(path);
 }
 
 function naturalizePath(path: string): string {
@@ -343,6 +398,15 @@ function titleCase(value: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function groupTitle(name: string): string {
+  const labels: Record<string, string> = {
+    qwen_model_language_model: "Language model",
+    qwen_model_visual: "Vision encoder",
+    qwen_model_lm_head: "Response-token output",
+  };
+  return labels[name] ?? titleCase(name);
+}
+
 function buildRegionGroups(): void {
   const nodesByName = new Map<string, string[]>();
   graph.forEachNode((node) => {
@@ -366,7 +430,7 @@ function buildRegionGroups(): void {
       label.className = "group-label";
       label.title = "Counts describe recorded graph structure, not measured risk";
       const nameElement = document.createElement("strong");
-      nameElement.textContent = titleCase(name);
+      nameElement.textContent = groupTitle(name);
       const count = document.createElement("span");
       count.textContent = stateCount && runtimeCount
         ? `${stateCount} state · ${runtimeCount} runtime${aggregatedLinkCount ? ` · ${aggregatedLinkCount.toLocaleString()} links` : ""}`
@@ -560,8 +624,12 @@ function readableInterface(region: Region): string {
     safe_feature: "SAFE input feature",
     qwen_observation_frame: "Decoded camera frame",
     qwen_observation_history: "Camera-frame history",
+    qwen_internal_compute: "Observed Qwen computation",
+    qwen_processor_output: "Processed Qwen input",
     qwen_private_compute: "Qwen inference",
+    qwen_response_decode: "Generated Qwen response",
     qwen_response_parser: "Qwen response parser",
+    registered_qwen_model_state: "Qwen parameters and buffers",
     simulator_command: "Simulator command",
     stale_image: "Stale-image intervention",
   };
@@ -621,6 +689,15 @@ function shortSymbol(value: string): string {
 }
 
 function sourceDescription(basis: string, region: Region): { kind: string; text: string } {
+  const qwenCode = basis.match(/^code:qwen@([^:]+):([^:]+):([^:]+):file-sha256-([a-f0-9]{64})$/);
+  if (qwenCode) {
+    const [, revision, implementation, method, implementationHash] = qwenCode;
+    return {
+      kind: "Implementation",
+      text: `Qwen model revision ${revision}, using ${shortSymbol(implementation)}.${method} from the implementation file with SHA-256 ${implementationHash}.`,
+    };
+  }
+
   const code = basis.match(/^code:([^@]+)@([^:]+):([^:]+):(.+)$/);
   if (code) {
     const [, repository, commit, symbol, behavior] = code;
@@ -671,7 +748,10 @@ function sourceDescription(basis: string, region: Region): { kind: string; text:
       "policy.projector": "OpenVLA multimodal projector",
       "policy.vision_backbone": "OpenVLA vision encoder",
     };
-    const moduleName = moduleNames[observedModule[1]] ?? "corresponding OpenVLA module";
+    const qwenModule = observedModule[1].startsWith("qwen_model.");
+    const moduleName = qwenModule
+      ? qwenIdentity(observedModule[1])
+      : moduleNames[observedModule[1]] ?? "corresponding OpenVLA module";
     const statePath = region.semanticKey.split("/state/")[1];
     if (statePath) {
       const identity = stateIdentity(titleCase(region.name), statePath).replaceAll(" · ", ", ");
@@ -679,7 +759,8 @@ function sourceDescription(basis: string, region: Region): { kind: string; text:
     }
     const actionToken = region.semanticKey.match(/action_token_(\d+)$/);
     const tokenContext = actionToken ? ` while generating action token ${actionToken[1]}` : " during policy execution";
-    return { kind: "Runtime", text: `The runtime trace attributed this computation to the ${moduleName}${tokenContext}.` };
+    const context = qwenModule ? " during Qwen monitor inference" : tokenContext;
+    return { kind: "Runtime", text: `The runtime trace attributed this computation to ${qwenModule ? "" : "the "}${moduleName}${context}.` };
   }
   if (basis === "observed:torch-dispatch-outside-module") {
     return { kind: "Runtime", text: "Observed as a PyTorch operation outside a registered model module." };
@@ -718,6 +799,7 @@ function renderInspector(region?: Region): void {
   inspectorContent.replaceChildren();
 
   if (!region) {
+    const campaign = dataset.traceCampaign;
     const empty = document.createElement("div");
     empty.className = "empty-inspector";
     empty.innerHTML = `
@@ -730,6 +812,7 @@ function renderInspector(region?: Region): void {
         <span></span>
         <strong>${dataset.totals.edges}</strong> directed links
       </div>
+      ${campaign ? `<p class="campaign-note"><strong>${campaign.totalQueries}</strong> audited queries · <strong>${campaign.coverage.regions.novelHoldouts}</strong> new structural regions in ${campaign.holdoutQueries} holdouts</p>` : ""}
     `;
     inspectorContent.append(empty);
     createIcons({ icons: { Route }, root: empty, attrs: { "stroke-width": 1.7 } });

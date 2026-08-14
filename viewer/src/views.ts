@@ -43,7 +43,7 @@ const DEFINITIONS: Record<ViewId, ViewDefinition> = {
     pathTargetSink: "qwen.alarm",
     pathTargetLabel: "Qwen alarm",
     emptyHeading: "Follow one evidence path",
-    emptyDescription: "Select a region to inspect its provenance and recorded path to the Qwen alarm. The path is reconstructed from frozen scoring artifacts; Qwen internals remain opaque.",
+    emptyDescription: "Select a region to inspect its recorded provenance and path to the Qwen alarm.",
   },
 };
 

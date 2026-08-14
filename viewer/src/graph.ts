@@ -9,10 +9,13 @@ import type {
   Scope,
 } from "./types";
 
-export const MODEL_STATE_INTERFACE = "registered_model_state";
+export const MODEL_STATE_INTERFACES = new Set([
+  "registered_model_state",
+  "registered_qwen_model_state",
+]);
 
 export function isModelState(region: Region): boolean {
-  return region.faultInterface === MODEL_STATE_INTERFACE;
+  return region.faultInterface !== null && MODEL_STATE_INTERFACES.has(region.faultInterface);
 }
 
 export function inMode(item: Region | EvidenceEdge, mode: ModeFilter): boolean {
@@ -89,7 +92,7 @@ export function buildGraph(dataset: GraphDataset): Graph {
     settings: {
       ...forceAtlas2.inferSettings(runtimeGraph),
       adjustSizes: false,
-      barnesHutOptimize: false,
+      barnesHutOptimize: runtimeGraph.order > 600,
       gravity: 0.7,
       scalingRatio: 9,
       slowDown: 6,
