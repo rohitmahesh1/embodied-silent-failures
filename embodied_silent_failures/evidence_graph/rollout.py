@@ -458,7 +458,7 @@ class RolloutEvidence:
                     ),
                 },
                 outputs={"success": bool(success), "policy_steps": policy_steps},
-                basis="code:embodied-silent-failures:run_openvla._run_trial:record-libero-terminal-outcome",
+                basis="code:embodied-silent-failures:openvla_rollout.run_trial:record-libero-terminal-outcome",
                 region="task_outcome",
                 role="sink",
                 lifetime="temporal",

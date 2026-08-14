@@ -64,15 +64,15 @@ ENVIRONMENT_STEP_BASIS = (
     "forward-command-to-simulator-and-return-next-observation"
 )
 
-# run_openvla._run_trial sets the pinned task state, then advances the simulator
+# openvla_rollout.run_trial sets the pinned task state, then advances the simulator
 # with the configured dummy command before the first policy observation.
 INITIAL_OBSERVATION_BASIS = (
-    "code:embodied-silent-failures:run_openvla._run_trial:"
+    "code:embodied-silent-failures:openvla_rollout.run_trial:"
     "set-pinned-initial-state-and-apply-configured-wait-steps"
 )
 
-# After the first policy step, _run_trial reuses the observation returned by the
-# preceding pinned LIBERO ControlEnv.step call.
+# After the first policy step, openvla_rollout.run_trial reuses the observation
+# returned by the preceding pinned LIBERO ControlEnv.step call.
 ROLLOUT_OBSERVATION_BASIS = (
     "code:libero@8f1084e:libero.libero.envs.env_wrapper.ControlEnv.step:"
     "return-observation-after-prior-policy-command"

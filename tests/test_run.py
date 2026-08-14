@@ -5,19 +5,21 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from embodied_silent_failures.run_openvla import (
-    Arguments,
+from embodied_silent_failures.openvla_rollout import (
+    REPLAY_OBSERVATION_TOLERANCE,
     CounterfactualReplayDivergence,
     CounterfactualReplayTerminated,
-    REPLAY_OBSERVATION_TOLERANCE,
+    build_image_intervention_record,
+    image_fault_applied,
+)
+from embodied_silent_failures.openvla_runtime import array_sha256, model_config
+from embodied_silent_failures.plan import Trial
+from embodied_silent_failures.replay import paired_clean_results
+from embodied_silent_failures.run_openvla import (
+    Arguments,
     _execution_record,
-    _image_fault_applied,
-    _image_intervention_record,
-    _array_sha256,
-    _paired_clean_results,
     _prepare_run,
 )
-from embodied_silent_failures.plan import Trial
 
 
 class RunTests(unittest.TestCase):
@@ -123,7 +125,7 @@ class RunTests(unittest.TestCase):
     def test_current_image_control_records_matched_stale_intervention(self) -> None:
         from embodied_silent_failures.stale_image_manifest import StaleImageSpec
 
-        record = _image_intervention_record(
+        record = build_image_intervention_record(
             StaleImageSpec(policy_step=80, image_lag=1, source_policy_step=79),
             "current_control",
             trial_seed=17,
@@ -146,9 +148,9 @@ class RunTests(unittest.TestCase):
 
         spec = StaleImageSpec(policy_step=80, image_lag=1, source_policy_step=79)
 
-        self.assertTrue(_image_fault_applied(spec, "stale", 80))
-        self.assertFalse(_image_fault_applied(spec, "stale", 79))
-        self.assertFalse(_image_fault_applied(spec, "current_control", 80))
+        self.assertTrue(image_fault_applied(spec, "stale", 80))
+        self.assertFalse(image_fault_applied(spec, "stale", 79))
+        self.assertFalse(image_fault_applied(spec, "current_control", 80))
 
     def test_execution_record_identifies_the_launch_that_wrote_a_trial(self) -> None:
         metadata = {
@@ -161,7 +163,8 @@ class RunTests(unittest.TestCase):
                 }
             },
             "evidence_graph_code_sha256": {
-                "embodied_silent_failures/run_openvla.py": "runner-hash"
+                "embodied_silent_failures/run_openvla.py": "runner-hash",
+                "embodied_silent_failures/openvla_rollout.py": "rollout-hash",
             },
         }
 
@@ -171,6 +174,7 @@ class RunTests(unittest.TestCase):
                 "run_started_at": "2026-08-14T12:00:00+00:00",
                 "experiment_code": metadata["repository_states"]["experiment_code"],
                 "run_openvla_sha256": "runner-hash",
+                "openvla_rollout_sha256": "rollout-hash",
             },
         )
 
@@ -190,12 +194,28 @@ class RunTests(unittest.TestCase):
         )
         runtime = SimpleNamespace(np=arrays)
         state = Array(b"values", (1, 2), "<f4")
-        digest = _array_sha256(runtime, state)
+        digest = array_sha256(runtime, state)
 
-        self.assertEqual(digest, _array_sha256(runtime, Array(b"values", (1, 2), "<f4")))
-        self.assertNotEqual(digest, _array_sha256(runtime, Array(b"values", (2, 1), "<f4")))
-        self.assertNotEqual(digest, _array_sha256(runtime, Array(b"values", (1, 2), "<f8")))
-        self.assertNotEqual(digest, _array_sha256(runtime, Array(b"changed", (1, 2), "<f4")))
+        self.assertEqual(
+            digest, array_sha256(runtime, Array(b"values", (1, 2), "<f4"))
+        )
+        self.assertNotEqual(
+            digest, array_sha256(runtime, Array(b"values", (2, 1), "<f4"))
+        )
+        self.assertNotEqual(
+            digest, array_sha256(runtime, Array(b"values", (1, 2), "<f8"))
+        )
+        self.assertNotEqual(
+            digest, array_sha256(runtime, Array(b"changed", (1, 2), "<f4"))
+        )
+
+    def test_model_config_uses_the_declared_checkpoint_and_suite(self) -> None:
+        config = model_config(Path("/checkpoint"), "libero_10")
+
+        self.assertEqual(config.pretrained_checkpoint, "/checkpoint")
+        self.assertEqual(config.task_suite_name, "libero_10")
+        self.assertEqual(config.unnorm_key, "libero_10")
+        self.assertTrue(config.output_hidden_states)
 
     def test_paired_clean_results_select_only_successful_references(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -215,7 +235,7 @@ class RunTests(unittest.TestCase):
                 path.write_text(json.dumps(value), encoding="utf-8")
 
             plan = [Trial(0, 0), Trial(0, 1)]
-            eligible, indexed = _paired_clean_results([clean_dir], plan)
+            eligible, indexed = paired_clean_results([clean_dir], plan)
 
             self.assertEqual(eligible, [Trial(0, 0)])
             self.assertEqual(set(indexed), set(plan))
@@ -224,7 +244,7 @@ class RunTests(unittest.TestCase):
     def test_paired_clean_results_reject_missing_references(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(FileNotFoundError):
-                _paired_clean_results([Path(directory)], [Trial(0, 0)])
+                paired_clean_results([Path(directory)], [Trial(0, 0)])
 
 
 if __name__ == "__main__":

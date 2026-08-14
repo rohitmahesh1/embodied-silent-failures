@@ -1,12 +1,20 @@
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.plan import load_trial_manifest, seed_for_trial
 from embodied_silent_failures.provenance import file_sha256, git_revision
+from embodied_silent_failures.openvla_rollout import REPLAY_OBSERVATION_TOLERANCE
+from embodied_silent_failures.openvla_runtime import (
+    CHECKPOINT_REVISION,
+    LIBERO_REVISION,
+    OPENVLA_REVISION,
+    array_sha256,
+    load_runtime,
+    model_config,
+)
 from embodied_silent_failures.probe_openvla import (
     _load_feature_bounds,
     _load_safe_monitor,
@@ -17,17 +25,8 @@ from embodied_silent_failures.replay import (
     CleanTrace,
     load_clean_trace,
     observation_error,
+    paired_clean_results,
     replay_action,
-)
-from embodied_silent_failures.run_openvla import (
-    CHECKPOINT_REVISION,
-    LIBERO_REVISION,
-    OPENVLA_REVISION,
-    REPLAY_OBSERVATION_TOLERANCE,
-    _array_sha256,
-    _load_runtime,
-    _model_config,
-    _paired_clean_results,
 )
 
 
@@ -214,21 +213,19 @@ def main() -> None:
         raise FileExistsError(f"probe output directory is not empty: {args.output_dir}")
 
     plan = load_trial_manifest(args.trial_manifest)
-    plan, clean_results = _paired_clean_results(args.paired_clean_dirs, plan)
-    runtime = _load_runtime(args.openvla_root, args.libero_root)
+    plan, clean_results = paired_clean_results(args.paired_clean_dirs, plan)
+    runtime = load_runtime(args.openvla_root, args.libero_root)
     monitor = _load_safe_monitor(args.safe_root, args.monitor_dir, runtime.torch)
     bounds = _load_feature_bounds(
         runtime.torch, args.calibration_clean_dir, args.calibration_split
     )
-    model_config = _model_config(
-        SimpleNamespace(checkpoint=args.checkpoint, task_suite=args.task_suite)
-    )
+    policy_config = model_config(args.checkpoint, args.task_suite)
     runtime.set_seed_everywhere(args.seed)
-    model = runtime.get_model(model_config)
+    model = runtime.get_model(policy_config)
     model.eval()
-    processor = runtime.get_processor(model_config)
+    processor = runtime.get_processor(policy_config)
     if args.task_suite not in model.norm_stats:
-        model_config.unnorm_key = f"{args.task_suite}_no_noops"
+        policy_config.unnorm_key = f"{args.task_suite}_no_noops"
 
     benchmark_class = runtime.benchmark.get_benchmark_dict()[args.task_suite]
     task_suite = benchmark_class()
@@ -255,9 +252,12 @@ def main() -> None:
                     minimum=args.minimum_policy_step,
                 )
                 initial_state = initial_states[task_id][trial.episode_index]
-                if _array_sha256(runtime, initial_state) != clean_result["initial_state_sha256"]:
+                if (
+                    array_sha256(runtime, initial_state)
+                    != clean_result["initial_state_sha256"]
+                ):
                     raise RuntimeError("clean reference initial state does not match LIBERO")
-                resize_size = runtime.get_image_resize_size(model_config)
+                resize_size = runtime.get_image_resize_size(policy_config)
                 eligible_lags = [lag for lag in args.image_lags if lag <= step]
                 images, observation, replay_error = _reconstruct_images(
                     runtime,
@@ -278,7 +278,7 @@ def main() -> None:
                 )
                 current = _inference_record(
                     runtime,
-                    model_config,
+                    policy_config,
                     model,
                     processor,
                     monitor,
@@ -305,7 +305,7 @@ def main() -> None:
                 for lag in eligible_lags:
                     stale = _inference_record(
                         runtime,
-                        model_config,
+                        policy_config,
                         model,
                         processor,
                         monitor,
