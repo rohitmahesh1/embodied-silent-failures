@@ -20,8 +20,8 @@ class QwenTemporalAnalysisTests(unittest.TestCase):
         task_id: int,
         stale_alarms: list[bool | None],
         control_alarms: list[bool | None],
+        fault_step: int = 5,
     ) -> None:
-        fault_step = 5
         condition = "stale_image" if source == "stale" else "current_image_control"
         success = source == "control"
         completion = {
@@ -97,7 +97,7 @@ class QwenTemporalAnalysisTests(unittest.TestCase):
         self.assertEqual(result["primary_result"]["pair_directions"], {"negative": 1, "positive": 1})
         self.assertEqual(result["first_exposed_query"]["stale_only_alarm"], 1)
         self.assertEqual(result["relative_queries"][0]["supported_pairs"], 2)
-        self.assertEqual(result["relative_queries"][0]["policy_step_offset_range"], [1, 5])
+        self.assertEqual(result["relative_queries"][0]["policy_step_offset_range"], [5, 5])
         self.assertEqual(
             result["first_alarm_timing_on_common_support"]["stale"][
                 "before_or_at_intervention"
@@ -129,6 +129,24 @@ class QwenTemporalAnalysisTests(unittest.TestCase):
         self.assertEqual(pair["post_indeterminate_queries"], 1)
         self.assertEqual(pair["post_stale_minus_control_alarm_fraction"], 1.0)
         self.assertEqual(result["first_exposed_query"]["indeterminate"], 1)
+
+    def test_policy_step_offsets_are_measured_from_each_intervention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for source in ("stale", "control"):
+                self._trial(
+                    root,
+                    source,
+                    task_id=0,
+                    stale_alarms=[False, False, True, False],
+                    control_alarms=[False, False, False, False],
+                    fault_step=7,
+                )
+            result = analyze(root)
+
+        self.assertEqual(
+            result["relative_queries"][0]["policy_step_offset_range"], [3, 3]
+        )
 
     def test_exact_paired_references_handle_ties_and_discordance(self) -> None:
         reference = _exact_sign_flip([1.0, -1.0, 0.0])

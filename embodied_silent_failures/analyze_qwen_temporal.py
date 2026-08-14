@@ -243,7 +243,9 @@ def analyze(trial_dir: Path, *, audit_source_videos: bool = False) -> dict[str, 
         raise ValueError("paired Qwen trials do not share one scoring configuration")
 
     pair_records = []
-    relative: dict[int, list[tuple[bool | None, bool | None]]] = defaultdict(list)
+    relative: dict[
+        int, list[tuple[bool | None, bool | None, int]]
+    ] = defaultdict(list)
     first_exposed = Counter()
     pre_alarm_counts: Counter[tuple[bool | None, bool | None]] = Counter()
     post_alarm_counts: Counter[tuple[bool | None, bool | None]] = Counter()
@@ -324,7 +326,11 @@ def analyze(trial_dir: Path, *, audit_source_videos: bool = False) -> dict[str, 
         pre_frame_hash_comparisons += len(pre_steps)
         for offset, step in enumerate(post_steps, start=1):
             relative[offset].append(
-                (stale_timeline[step].get("alarm"), control_timeline[step].get("alarm"))
+                (
+                    stale_timeline[step].get("alarm"),
+                    control_timeline[step].get("alarm"),
+                    step - fault_step,
+                )
             )
         immediate = (
             stale_timeline[post_steps[0]].get("alarm"),
@@ -359,14 +365,18 @@ def analyze(trial_dir: Path, *, audit_source_videos: bool = False) -> dict[str, 
     for offset, observations in sorted(relative.items()):
         counts = Counter(
             (left, right)
-            for left, right in observations
+            for left, right, _policy_step_offset in observations
             if left is not None and right is not None
         )
+        policy_step_offsets = [item[2] for item in observations]
         determinate = sum(counts.values())
         relative_queries.append(
             {
                 "query_offset_after_intervention": offset,
-                "policy_step_offset_range": [5 * (offset - 1) + 1, 5 * offset],
+                "policy_step_offset_range": [
+                    min(policy_step_offsets),
+                    max(policy_step_offsets),
+                ],
                 "supported_pairs": len(observations),
                 "determinate_pairs": determinate,
                 "both_alarm": counts[(True, True)],

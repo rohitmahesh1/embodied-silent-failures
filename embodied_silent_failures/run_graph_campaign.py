@@ -29,15 +29,23 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--require-canary", action="store_true")
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument("--poll-seconds", type=int, default=60)
-    parser.add_argument("--stall-minutes", type=int, default=30)
+    parser.add_argument(
+        "--stall-minutes",
+        type=int,
+        default=0,
+        help=(
+            "stop after this many minutes without a terminal trial record; "
+            "disabled by default because a long rollout is not proof of a stall"
+        ),
+    )
     parser.add_argument("--workspace", type=Path, default=Path("/workspace"))
     parser.add_argument("--workspace-quota-gb", type=float, default=100.0)
     parser.add_argument("--minimum-free-gb", type=float, default=15.0)
     args = parser.parse_args()
     if args.max_attempts <= 0:
         raise ValueError("max attempts must be positive")
-    if args.poll_seconds <= 0 or args.stall_minutes <= 0:
-        raise ValueError("poll and stall intervals must be positive")
+    if args.poll_seconds <= 0 or args.stall_minutes < 0:
+        raise ValueError("poll interval must be positive and stall interval nonnegative")
     if args.minimum_free_gb <= 0 or args.workspace_quota_gb <= args.minimum_free_gb:
         raise ValueError("workspace quota must exceed the minimum free space")
     return args
@@ -202,8 +210,17 @@ def _run_stage(
     try:
         validation = _validate_stage(stage, output_dir, evidence_dir)
         return {"name": stage["name"], "state": "complete", "resumed": True, **validation}
-    except (FileNotFoundError, ValueError):
-        pass
+    except (FileNotFoundError, ValueError) as error:
+        terminal_count = sum(_terminal_counts(output_dir))
+        if terminal_count >= int(stage["expected_trials"]):
+            return {
+                "name": stage["name"],
+                "state": "failed",
+                "resumed": True,
+                "validation_error": str(error),
+                "terminal_trials": terminal_count,
+                "retryable": False,
+            }
 
     for attempt in range(1, args.max_attempts + 1):
         storage = _check_storage(args)
@@ -226,7 +243,10 @@ def _run_stage(
                 if counts != previous_counts:
                     previous_counts = counts
                     last_progress = time.monotonic()
-                if time.monotonic() - last_progress > args.stall_minutes * 60:
+                if (
+                    args.stall_minutes
+                    and time.monotonic() - last_progress > args.stall_minutes * 60
+                ):
                     stalled = True
                     _stop_process(process)
                     break
@@ -266,6 +286,15 @@ def _run_stage(
                 }
             except (FileNotFoundError, ValueError) as error:
                 attempts[-1]["validation_error"] = str(error)
+                terminal_count = sum(_terminal_counts(output_dir))
+                if terminal_count >= int(stage["expected_trials"]):
+                    return {
+                        "name": stage["name"],
+                        "state": "failed",
+                        "attempts": attempts,
+                        "terminal_trials": terminal_count,
+                        "retryable": False,
+                    }
     return {"name": stage["name"], "state": "failed", "attempts": attempts}
 
 

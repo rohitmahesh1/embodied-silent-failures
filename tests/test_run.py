@@ -10,6 +10,8 @@ from embodied_silent_failures.run_openvla import (
     CounterfactualReplayDivergence,
     CounterfactualReplayTerminated,
     REPLAY_OBSERVATION_TOLERANCE,
+    _execution_record,
+    _image_fault_applied,
     _image_intervention_record,
     _array_sha256,
     _paired_clean_results,
@@ -136,6 +138,39 @@ class RunTests(unittest.TestCase):
                 "matched_stale_image_lag": 1,
                 "matched_stale_source_policy_step": 79,
                 "trial_seed": 17,
+            },
+        )
+
+    def test_only_stale_image_mode_records_an_applied_fault(self) -> None:
+        from embodied_silent_failures.stale_image_manifest import StaleImageSpec
+
+        spec = StaleImageSpec(policy_step=80, image_lag=1, source_policy_step=79)
+
+        self.assertTrue(_image_fault_applied(spec, "stale", 80))
+        self.assertFalse(_image_fault_applied(spec, "stale", 79))
+        self.assertFalse(_image_fault_applied(spec, "current_control", 80))
+
+    def test_execution_record_identifies_the_launch_that_wrote_a_trial(self) -> None:
+        metadata = {
+            "created_at": "2026-08-14T12:00:00+00:00",
+            "repository_states": {
+                "experiment_code": {
+                    "revision": "revision-two",
+                    "dirty": False,
+                    "worktree_sha256": "clean-tree",
+                }
+            },
+            "evidence_graph_code_sha256": {
+                "embodied_silent_failures/run_openvla.py": "runner-hash"
+            },
+        }
+
+        self.assertEqual(
+            _execution_record(metadata),
+            {
+                "run_started_at": "2026-08-14T12:00:00+00:00",
+                "experiment_code": metadata["repository_states"]["experiment_code"],
+                "run_openvla_sha256": "runner-hash",
             },
         )
 

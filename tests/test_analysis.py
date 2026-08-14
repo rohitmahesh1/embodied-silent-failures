@@ -14,10 +14,16 @@ from embodied_silent_failures.analysis import (
     summarize_by_fault_field,
     summarize_outcomes,
 )
-from embodied_silent_failures.score_safe import alarm_windows
+from embodied_silent_failures.score_safe import _monitor_kind, alarm_windows
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_safe_monitor_kind_comes_from_the_frozen_model_name(self) -> None:
+        self.assertEqual(_monitor_kind("indep"), "safe_mlp")
+        self.assertEqual(_monitor_kind("lstm"), "safe_lstm")
+        with self.assertRaises(ValueError):
+            _monitor_kind("unknown")
+
     def result(
         self,
         condition: str,

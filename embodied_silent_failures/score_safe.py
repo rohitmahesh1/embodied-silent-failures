@@ -19,6 +19,10 @@ ALARM_WINDOWS = {
     "within_10_steps": 10,
     "within_25_steps": 25,
 }
+SAFE_MONITOR_KINDS = {
+    "indep": "safe_mlp",
+    "lstm": "safe_lstm",
+}
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -33,6 +37,13 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--output-prefix", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=16)
     return parser.parse_args()
+
+
+def _monitor_kind(model_name: str) -> str:
+    try:
+        return SAFE_MONITOR_KINDS[model_name]
+    except KeyError as error:
+        raise ValueError(f"unsupported SAFE monitor model: {model_name}") from error
 
 
 def _sha256(path: Path) -> str:
@@ -216,6 +227,8 @@ def main() -> None:
         raise ValueError("frozen monitor bands contain non-finite values")
 
     cfg = OmegaConf.load(monitor_paths["configuration"])
+    safe_model_name = str(cfg.model.name)
+    monitor_kind = _monitor_kind(safe_model_name)
     indexed_rollouts = []
     for label, run_dir in zip(labels, args.run_dirs):
         if not run_dir.is_dir():
@@ -350,6 +363,8 @@ def main() -> None:
         },
         "monitor": {
             "directory": str(args.monitor_dir.resolve()),
+            "kind": monitor_kind,
+            "safe_model_name": safe_model_name,
             "checkpoint_sha256": _sha256(monitor_paths["checkpoint"]),
             "configuration_sha256": _sha256(monitor_paths["configuration"]),
             "split_manifest_sha256": _sha256(monitor_paths["split_manifest"]),
@@ -394,7 +409,8 @@ def main() -> None:
         attach_monitor_timeline(
             evidence_dir,
             {
-                "kind": "safe_mlp",
+                "kind": output["monitor"]["kind"],
+                "safe_model_name": output["monitor"]["safe_model_name"],
                 "safe_revision": SAFE_REVISION,
                 "checkpoint_sha256": output["monitor"]["checkpoint_sha256"],
                 "configuration_sha256": output["monitor"]["configuration_sha256"],

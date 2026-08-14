@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from embodied_silent_failures.prepare_graph_campaign import (
     _clean_stages,
@@ -12,6 +13,7 @@ from embodied_silent_failures.prepare_qwen_rollout_graph_campaign import (
     prepare_campaign,
 )
 from embodied_silent_failures.qwen_artifacts import file_sha256
+from embodied_silent_failures.run_graph_campaign import _run_stage
 
 
 def _completion(task_id: int, episode_index: int, success: bool, steps: int) -> dict:
@@ -28,6 +30,48 @@ def _completion(task_id: int, episode_index: int, success: bool, steps: int) -> 
 
 
 class GraphCampaignTests(unittest.TestCase):
+    def test_terminal_invalid_stage_is_not_blindly_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            campaign_dir = root / "campaign"
+            output_root = root / "outputs"
+            stage_output = output_root / "stage"
+            campaign_dir.mkdir()
+            stage_output.mkdir(parents=True)
+            (stage_output / "task0--ep0.complete.json").write_text(
+                "not valid JSON", encoding="utf-8"
+            )
+            stage = {
+                "name": "stage",
+                "kind": "clean",
+                "manifest": str(root / "manifest.json"),
+                "save_video": False,
+                "trace_steps": [0],
+                "expected_trials": 1,
+                "allow_exclusions": False,
+            }
+            args = SimpleNamespace(
+                campaign_dir=campaign_dir,
+                output_root=output_root,
+                checkpoint=root / "checkpoint",
+                openvla_root=root / "openvla",
+                libero_root=root / "libero",
+                paired_clean_dir=[],
+                max_attempts=2,
+                poll_seconds=1,
+                stall_minutes=0,
+                workspace=root,
+                workspace_quota_gb=100.0,
+                minimum_free_gb=1.0,
+            )
+
+            result = _run_stage(args, stage, "start")
+
+        self.assertEqual(result["state"], "failed")
+        self.assertFalse(result["retryable"])
+        self.assertEqual(result["terminal_trials"], 1)
+        self.assertNotIn("attempts", result)
+
     def test_clean_stages_are_balanced_and_disjoint(self) -> None:
         clean = {}
         for task_id in range(10):

@@ -299,6 +299,12 @@ def _image_intervention_record(
     raise ValueError(f"unsupported image input mode: {mode}")
 
 
+def _image_fault_applied(spec: StaleImageSpec, mode: str, policy_step: int) -> bool:
+    if mode not in {"stale", "current_control"}:
+        raise ValueError(f"unsupported image input mode: {mode}")
+    return mode == "stale" and policy_step == spec.policy_step
+
+
 def _git_revision(path: Path) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -726,6 +732,16 @@ def _prepare_run(args: Arguments, metadata: dict[str, Any]) -> None:
         write_json_atomic(path, existing)
 
 
+def _execution_record(metadata: dict[str, Any]) -> dict[str, Any]:
+    experiment_code = metadata["repository_states"]["experiment_code"]
+    runner_path = "embodied_silent_failures/run_openvla.py"
+    return {
+        "run_started_at": metadata["created_at"],
+        "experiment_code": experiment_code,
+        "run_openvla_sha256": metadata["evidence_graph_code_sha256"][runner_path],
+    }
+
+
 def _paired_clean_results(
     directories: list[Path], plan: list[Trial]
 ) -> tuple[list[Trial], dict[Trial, dict[str, Any]]]:
@@ -857,6 +873,7 @@ def _run_trial(
     fault_injector: TransientActivationFault | None,
     clean_trace: CleanTrace | None,
     stale_image_spec: StaleImageSpec | None,
+    execution: dict[str, Any],
     evidence: RolloutEvidence | None = None,
 ) -> dict[str, Any]:
     runtime.torch.cuda.reset_peak_memory_stats()
@@ -1080,7 +1097,9 @@ def _run_trial(
                 record is not None and record["policy_step"] == policy_step
             )
         elif stale_image_spec is not None:
-            row["fault/injected"] = policy_step == stale_image_spec.policy_step
+            row["fault/injected"] = _image_fault_applied(
+                stale_image_spec, args.image_input_mode, policy_step
+            )
 
         simulator_started = time.perf_counter()
         if evidence is not None:
@@ -1180,6 +1199,7 @@ def _run_trial(
         "simulator_seconds": sum(simulator_seconds),
         "artifact_seconds": artifact_seconds,
         "peak_cuda_memory_bytes": runtime.torch.cuda.max_memory_allocated(),
+        "execution": execution,
         "fault": fault_record,
         "counterfactual_replay": (
             {
@@ -1296,6 +1316,7 @@ def main() -> None:
     runtime = _load_runtime(args.openvla_root, args.libero_root)
     metadata = _run_metadata(args, runtime, plan, run_condition, fault_model)
     _prepare_run(args, metadata)
+    execution = _execution_record(metadata)
 
     benchmark_class = runtime.benchmark.get_benchmark_dict()[args.task_suite]
     task_suite = benchmark_class()
@@ -1455,6 +1476,7 @@ def main() -> None:
                             fault_injector,
                             clean_trace,
                             trial_stale_image_spec,
+                            execution,
                             evidence,
                         )
                     except CounterfactualReplayInvalid as error:
@@ -1484,6 +1506,7 @@ def main() -> None:
                                 ),
                                 "observation_tolerance": REPLAY_OBSERVATION_TOLERANCE,
                                 "clean_source_directory": str(clean_trace.source_dir),
+                                "execution": execution,
                             },
                         )
                         excluded += 1
