@@ -693,10 +693,10 @@ function shortSymbol(value: string): string {
 function sourceDescription(basis: string, region: Region): { kind: string; text: string } {
   const qwenCode = basis.match(/^code:qwen@([^:]+):([^:]+):([^:]+):file-sha256-([a-f0-9]{64})$/);
   if (qwenCode) {
-    const [, revision, implementation, method, implementationHash] = qwenCode;
+    const [, revision, implementation, method] = qwenCode;
     return {
       kind: "Implementation",
-      text: `Qwen model revision ${revision}, using ${shortSymbol(implementation)}.${method} from the implementation file with SHA-256 ${implementationHash}.`,
+      text: `Qwen3-VL-8B-Instruct revision ${revision} on Hugging Face, using ${shortSymbol(implementation)}.${method} from the exact recorded Transformers implementation.`,
     };
   }
 
