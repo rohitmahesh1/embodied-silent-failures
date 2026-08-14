@@ -7,7 +7,8 @@
     "build": "tsc --noEmit && vite build",
     "dev": "vite --host 0.0.0.0",
     "export:demo": "node scripts/export-graphs.mjs",
-    "export:qwen": "node scripts/export-qwen-traces.mjs"
+    "export:qwen": "node scripts/export-graphs.mjs --view qwen",
+    "export:qwen-internals": "node scripts/export-qwen-traces.mjs"
   },
   "dependencies": {
     "graphology": "^0.26.0",

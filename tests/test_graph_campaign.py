@@ -7,6 +7,11 @@ from embodied_silent_failures.prepare_graph_campaign import (
     _clean_stages,
     _paired_stages,
 )
+from embodied_silent_failures.prepare_qwen_rollout_graph_campaign import (
+    SELECTION_BASIS,
+    prepare_campaign,
+)
+from embodied_silent_failures.qwen_artifacts import file_sha256
 
 
 def _completion(task_id: int, episode_index: int, success: bool, steps: int) -> dict:
@@ -126,6 +131,105 @@ class GraphCampaignTests(unittest.TestCase):
         self.assertEqual(summary["pair_count"], 26)
         self.assertEqual(len(stages), 20)
         self.assertEqual(sum(item["expected_trials"] for item in stages), 52)
+
+    def test_qwen_rollout_campaign_reuses_published_safe_representatives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = root / "reference-job"
+            output = root / "reference-output"
+            manifests = job / "manifests"
+            manifests.mkdir(parents=True)
+            ordinary = {"task_id": 0, "episode_index": 27}
+            pair = {
+                "task_id": 0,
+                "episode_index": 0,
+                "stale_image": {
+                    "policy_step": 28,
+                    "image_lag": 1,
+                    "source_policy_step": 27,
+                },
+            }
+            (manifests / "census-wave-0.json").write_text(
+                json.dumps({"schema_version": 1, "trials": [ordinary]}),
+                encoding="utf-8",
+            )
+            (manifests / "intervention-task-0.json").write_text(
+                json.dumps({"schema_version": 1, "trials": [pair]}),
+                encoding="utf-8",
+            )
+            campaign = {
+                "schema_version": 1,
+                "stages": [
+                    {
+                        "name": "census-wave-0",
+                        "kind": "clean",
+                        "manifest": str(manifests / "census-wave-0.json"),
+                    },
+                    {
+                        "name": "intervention-task-0-stale",
+                        "kind": "stale_image",
+                        "image_input_mode": "stale",
+                        "manifest": str(manifests / "intervention-task-0.json"),
+                    },
+                    {
+                        "name": "intervention-task-0-current-control",
+                        "kind": "stale_image",
+                        "image_input_mode": "current_control",
+                        "manifest": str(manifests / "intervention-task-0.json"),
+                    },
+                ],
+            }
+            (job / "campaign.json").write_text(
+                json.dumps(campaign), encoding="utf-8"
+            )
+            graph_hashes = {}
+            identities = {
+                "ordinary": ("census-wave-0", ordinary),
+                "control": ("intervention-task-0-current-control", pair),
+                "stale": ("intervention-task-0-stale", pair),
+            }
+            for mode, (stage, trial) in identities.items():
+                graph = (
+                    output
+                    / "evidence"
+                    / stage
+                    / f"task{trial['task_id']}--ep{trial['episode_index']}"
+                    / "graph.json"
+                )
+                graph.parent.mkdir(parents=True)
+                graph.write_text(json.dumps({"mode": mode}), encoding="utf-8")
+                graph_hashes[mode] = file_sha256(graph)
+            viewer = root / "safe-viewer.json"
+            viewer.write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {"mode": mode, "graphSha256": digest}
+                            for mode, digest in graph_hashes.items()
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = prepare_campaign(
+                job,
+                output,
+                root / "new-campaign",
+                viewer,
+            )
+
+        self.assertEqual(result["selection_basis"], SELECTION_BASIS)
+        self.assertEqual(result["reference_graph_sha256"], graph_hashes)
+        self.assertEqual(
+            result["reference_trials"],
+            {
+                "ordinary": ordinary,
+                "control": ordinary | {"episode_index": 0},
+                "stale": ordinary | {"episode_index": 0},
+            },
+        )
+        self.assertTrue(all(stage["save_video"] for stage in result["stages"]))
 
 
 if __name__ == "__main__":

@@ -657,8 +657,8 @@ const behaviorDescriptions: Record<string, string> = {
   "decode-and-unnormalize-action-tokens": "decodes and unnormalizes the generated action tokens",
   "executed-command-from-clean-artifact": "replays the command from the paired clean rollout",
   "forward-command-to-simulator-and-return-next-observation": "sends the command to the simulator and returns the next observation",
-    "monitor-results-attached-after-scoring": "attaches the monitor result after SAFE scoring",
-    "pinned-greedy-response-from-frozen-scoring-artifact": "uses the greedy response preserved by the pinned scoring run",
+  "monitor-results-attached-after-scoring": "attaches the monitor result after SAFE scoring",
+  "pinned-greedy-response-from-frozen-scoring-artifact": "uses the greedy response preserved by the pinned scoring run",
   "no-intervention-applied": "records that no intervention was applied",
   "preprocess-selected-image-and-task-prompt": "prepares the selected image and task prompt for the policy",
   "record-applied-intervention": "records the intervention that was applied",
@@ -670,6 +670,8 @@ const behaviorDescriptions: Record<string, string> = {
   "select-final-action-token-feature": "selects the final-layer feature for each action token",
   "selected-policy-image": "records the image selected as policy input",
   "set-pinned-initial-state-and-apply-configured-wait-steps": "pins the initial simulator state and applies the configured wait steps",
+  "recorded-policy-image-then-lossy-video-encode-and-rgb-decode": "derives the Qwen frame from the recorded policy image through the rollout video's lossy encode and RGB decode",
+  "all-frozen-query-alarms-in-policy-step-order": "collects every frozen Qwen alarm in policy-step order",
   current_visual_observation_not_selected_by_stale_policy_input: "the current camera observation was not selected as policy input",
   intentionally_discarded_final_vision_block: "the final vision block is intentionally not used",
   not_applicable_clean_rollout: "no intervention applies to an ordinary rollout",
@@ -778,6 +780,7 @@ function sourceDescription(basis: string, region: Region): { kind: string; text:
       "rollout-evidence-v1": "rollout protocol",
       "stale-image-v1": "stale-image protocol",
       "qwen-observation-monitor-v1": "Qwen observation-monitor protocol",
+      "qwen-rollout-evidence-v1": "Qwen rollout-evidence protocol",
     };
     return {
       kind: "Protocol",

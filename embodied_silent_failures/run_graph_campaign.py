@@ -104,7 +104,7 @@ def _stage_command(
         "7",
         "--wait-steps",
         "10",
-        "--no-save-video",
+        "--save-video" if stage.get("save_video", False) else "--no-save-video",
         "--resume",
         "--output-dir",
         str(output_dir),

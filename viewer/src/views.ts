@@ -37,13 +37,13 @@ const DEFINITIONS: Record<ViewId, ViewDefinition> = {
     subtitle: "OpenVLA · LIBERO-10 · Qwen",
     datasetPath: "data/openvla-qwen-graph.json",
     monitorLabel: "Qwen",
-    monitorSink: "qwen.alarm",
+    monitorSink: "rollout.monitor_timeline",
     outcomeSink: "rollout.outcome",
-    pathTargetRegion: "qwen_alarm",
-    pathTargetSink: "qwen.alarm",
-    pathTargetLabel: "Qwen alarm",
+    pathTargetRegion: "task_outcome",
+    pathTargetSink: "rollout.outcome",
+    pathTargetLabel: "task outcome",
     emptyHeading: "Follow one evidence path",
-    emptyDescription: "Select a region to inspect its recorded provenance and path to the Qwen alarm.",
+    emptyDescription: "Select a region to inspect its provenance and its recorded path to the task outcome.",
   },
 };
 
