@@ -825,9 +825,7 @@ function renderInspector(region?: Region): void {
   eyebrow.className = `eyebrow ${sinkClass(region)}`;
   eyebrow.textContent = isModelState(region)
     ? "Model state"
-    : view.id === "qwen"
-      ? "Recorded evidence"
-      : "Runtime evidence";
+    : "Runtime evidence";
   const heading = document.createElement("h2");
   heading.textContent = displayLabel(region);
   const summary = document.createElement("p");
