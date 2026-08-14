@@ -21,6 +21,18 @@ import {
   isModelState,
   shortestPath,
 } from "./graph";
+import {
+  classifySink,
+  colorForRegion,
+  describeBehavior,
+  displayLabel as presentDisplayLabel,
+  groupTitle,
+  modeSentence,
+  pathLabel as presentPathLabel,
+  reachabilitySentence as presentReachabilitySentence,
+  readableInterface,
+} from "./presentation";
+import { sourceDescription } from "./provenance";
 import type {
   EvidenceEdge,
   GraphDataset,
@@ -151,24 +163,11 @@ function regionFor(node: string): Region {
 }
 
 function sinkClass(region: Region): "both" | "monitor" | "outcome" | "neither" | "state" {
-  if (isModelState(region)) return "state";
-  const monitor = region.reachableSinks.includes(view.monitorSink);
-  const outcome = region.reachableSinks.includes(view.outcomeSink);
-  if (monitor && outcome) return "both";
-  if (monitor) return "monitor";
-  if (outcome) return "outcome";
-  return "neither";
+  return classifySink(region, view);
 }
 
 function nodeColor(region: Region): string {
-  const colors = {
-    both: "#3568b8",
-    monitor: "#16846d",
-    outcome: "#d2643f",
-    neither: "#929c9a",
-    state: "#aeb8b5",
-  };
-  return colors[sinkClass(region)];
+  return colorForRegion(region, view);
 }
 
 function isVisible(region: Region): boolean {
@@ -176,162 +175,11 @@ function isVisible(region: Region): boolean {
 }
 
 function displayLabel(region: Region): string {
-  const base = titleCase(region.name);
-  const statePath = region.semanticKey.split("/state/")[1];
-  if (statePath) return stateIdentity(base, statePath);
-
-  const qwenModule = region.semanticKey.match(/^qwen_model\/module\/(.+)$/);
-  if (qwenModule) return qwenIdentity(qwenModule[1]);
-
-  const detail = region.semanticKey.split("/")[1];
-  if (detail) return `${base} · ${titleCase(detail)}`;
-  if ((regionNameCounts.get(region.name) ?? 0) === 1) return base;
-
-  const evidence = readableInterface(region);
-  const status = compactReachability(region);
-  if (region.faultInterface) return `${base} · ${evidence} · ${status}`;
-  if (region.disposition) return `${base} · ${describeBehavior(region.disposition)} · ${status}`;
-  return `${base} · ${status}`;
+  return presentDisplayLabel(region, view, regionNameCounts.get(region.name) ?? 0);
 }
 
 function pathLabel(region: Region): string {
-  const base = titleCase(region.name);
-  const statePath = region.semanticKey.split("/state/")[1];
-  if (statePath) return stateIdentity(base, statePath);
-  const qwenModule = region.semanticKey.match(/^qwen_model\/module\/(.+)$/);
-  if (qwenModule) return qwenIdentity(qwenModule[1]);
-  const detail = region.semanticKey.split("/")[1];
-  if (compactPathQuery.matches) {
-    if (detail) return titleCase(detail);
-    if (region.faultInterface) return readableInterface(region);
-    return base;
-  }
-  if (detail) return `${base} · ${titleCase(detail)}`;
-  if (region.faultInterface) return `${base} · ${readableInterface(region)}`;
-  return base;
-}
-
-const componentNames: Record<string, string> = {
-  "attn.proj": "attention output",
-  "attn.qkv": "attention QKV",
-  "input_layernorm": "input normalization",
-  "ls1": "layer scale 1",
-  "ls2": "layer scale 2",
-  "mlp.down_proj": "MLP down projection",
-  "mlp.fc1": "MLP input",
-  "mlp.fc2": "MLP output",
-  "mlp.gate_proj": "MLP gate projection",
-  "mlp.linear_fc1": "MLP input",
-  "mlp.linear_fc2": "MLP output",
-  "mlp.up_proj": "MLP up projection",
-  "norm1": "normalization 1",
-  "norm2": "normalization 2",
-  "post_attention_layernorm": "post-attention normalization",
-  "self_attn.k_proj": "attention key projection",
-  "self_attn.k_norm": "attention key normalization",
-  "self_attn.o_proj": "attention output projection",
-  "self_attn.q_proj": "attention query projection",
-  "self_attn.q_norm": "attention query normalization",
-  "self_attn.rotary_emb": "rotary position encoding",
-  "self_attn.v_proj": "attention value projection",
-};
-
-function stateIdentity(base: string, path: string): string {
-  if (path.startsWith("qwen_model.")) return qwenIdentity(path);
-
-  const languageLayer = path.match(/^policy\.language_model\.model\.layers\.(\d+)\.(.+)$/);
-  if (languageLayer) {
-    return `${base} · Layer ${languageLayer[1]} · ${componentNames[languageLayer[2]] ?? naturalizePath(languageLayer[2])}`;
-  }
-
-  const visionBlock = path.match(/^policy\.vision_backbone\.(fused_featurizer|featurizer)\.blocks\.(\d+)\.(.+)$/);
-  if (visionBlock) {
-    const branch = visionBlock[1] === "fused_featurizer" ? "Fused branch" : "Vision branch";
-    return `${base} · ${branch} block ${visionBlock[2]} · ${componentNames[visionBlock[3]] ?? naturalizePath(visionBlock[3])}`;
-  }
-
-  return `${base} · ${naturalizePath(path)}`;
-}
-
-function qwenIdentity(path: string): string {
-  const languageLayer = path.match(/^qwen_model\.model\.language_model\.layers\.(\d+)(?:\.(.+))?$/);
-  if (languageLayer) {
-    const detail = languageLayer[2];
-    return detail
-      ? `Language model · Layer ${languageLayer[1]} · ${componentNames[detail] ?? naturalizePath(detail)}`
-      : `Language model · Layer ${languageLayer[1]}`;
-  }
-
-  const visionBlock = path.match(/^qwen_model\.model\.visual\.blocks\.(\d+)(?:\.(.+))?$/);
-  if (visionBlock) {
-    const detail = visionBlock[2];
-    return detail
-      ? `Vision encoder · Block ${visionBlock[1]} · ${componentNames[detail] ?? naturalizePath(detail)}`
-      : `Vision encoder · Block ${visionBlock[1]}`;
-  }
-
-  const deepstack = path.match(/^qwen_model\.model\.visual\.deepstack_merger_list\.(\d+)(?:\.(.+))?$/);
-  if (deepstack) {
-    const detail = deepstack[2];
-    return detail
-      ? `Vision encoder · Deepstack merger ${deepstack[1]} · ${naturalizePath(detail)}`
-      : `Vision encoder · Deepstack merger ${deepstack[1]}`;
-  }
-
-  const names: Array<[string, string]> = [
-    ["qwen_model.model.language_model.embed_tokens", "Language model · Token embedding"],
-    ["qwen_model.model.language_model.rotary_emb", "Language model · Rotary position encoding"],
-    ["qwen_model.model.language_model.norm", "Language model · Output normalization"],
-    ["qwen_model.model.language_model", "Language model"],
-    ["qwen_model.model.visual.patch_embed", "Vision encoder · Patch embedding"],
-    ["qwen_model.model.visual.merger", "Vision encoder · Merger"],
-    ["qwen_model.model.visual", "Vision encoder"],
-    ["qwen_model.lm_head", "Response-token output"],
-    ["qwen_model.model", "Qwen model"],
-    ["qwen_model", "Qwen model root"],
-  ];
-  for (const [prefix, label] of names) {
-    if (path === prefix) return label;
-    if (path.startsWith(`${prefix}.`)) return `${label} · ${naturalizePath(path.slice(prefix.length + 1))}`;
-  }
-  return naturalizePath(path);
-}
-
-function naturalizePath(path: string): string {
-  const names: Record<string, string> = {
-    policy: "",
-    language_model: "Language model",
-    model: "",
-    vision_backbone: "Vision encoder",
-    fused_featurizer: "Fused branch",
-    featurizer: "Vision branch",
-    attn_pool: "Attention pool",
-    patch_embed: "Patch embedding",
-    embed_tokens: "Token embedding",
-    lm_head: "Action-token output",
-    projector: "Multimodal projector",
-    proj: "Projection",
-    norm: "Normalization",
-    q: "Query",
-    kv: "Key/value",
-    fc1: "Layer 1",
-    fc2: "Layer 2",
-    fc3: "Layer 3",
-  };
-  return path
-    .split(".")
-    .map((part) => names[part] ?? titleCase(part))
-    .filter(Boolean)
-    .join(" · ");
-}
-
-function compactReachability(region: Region): string {
-  const monitor = region.reachableSinks.includes(view.monitorSink);
-  const outcome = region.reachableSinks.includes(view.outcomeSink);
-  if (monitor && outcome) return `${view.monitorLabel} + outcome`;
-  if (monitor) return `${view.monitorLabel} only`;
-  if (outcome) return "outcome only";
-  return "no recorded sink";
+  return presentPathLabel(region, compactPathQuery.matches);
 }
 
 function refreshGraph(): void {
@@ -390,21 +238,6 @@ function refreshGraph(): void {
   });
 
   renderer.refresh();
-}
-
-function titleCase(value: string): string {
-  return value
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function groupTitle(name: string): string {
-  const labels: Record<string, string> = {
-    qwen_model_language_model: "Language model",
-    qwen_model_visual: "Vision encoder",
-    qwen_model_lm_head: "Response-token output",
-  };
-  return labels[name] ?? titleCase(name);
 }
 
 function buildRegionGroups(): void {
@@ -604,191 +437,8 @@ function textSpan(value: string, className = ""): HTMLSpanElement {
   return span;
 }
 
-function readableInterface(region: Region): string {
-  const labels: Record<string, string> = {
-    action_tokens: "Generated action tokens",
-    current_image_control: "Current-image control",
-    environment_observation: "Camera observation",
-    executed_command: "Robot command",
-    final_layer_action_features: "Final-layer action features",
-    model_input: "Image and task prompt",
-    observation_image: "Processed camera image",
-    policy_call: "Policy execution",
-    policy_image_buffer: "Selected policy image",
-    prior_policy_image_buffer: "Earlier policy image",
-    processed_policy_input: "Processed policy input",
-    raw_action: "Decoded action",
-    registered_model_state: "Model parameters and buffers",
-    replayed_executed_command: "Replayed clean command",
-    replayed_safe_feature: "Replayed clean SAFE feature",
-    safe_feature: "SAFE input feature",
-    qwen_observation_frame: "Decoded camera frame",
-    qwen_observation_history: "Camera-frame history",
-    qwen_internal_compute: "Observed Qwen computation",
-    qwen_processor_output: "Processed Qwen input",
-    qwen_private_compute: "Qwen inference",
-    qwen_response_decode: "Generated Qwen response",
-    qwen_response_parser: "Qwen response parser",
-    registered_qwen_model_state: "Qwen parameters and buffers",
-    simulator_command: "Simulator command",
-    stale_image: "Stale-image intervention",
-  };
-  return region.faultInterface ? labels[region.faultInterface] ?? titleCase(region.faultInterface) : "Observed computation";
-}
-
 function reachabilitySentence(region: Region): string {
-  const monitor = region.reachableSinks.includes(view.monitorSink);
-  const outcome = region.reachableSinks.includes(view.outcomeSink);
-  if (monitor && outcome) return `The recorded graph connects this region to both the ${view.monitorLabel} monitor and the task outcome.`;
-  if (monitor) return `The recorded graph connects this region to the ${view.monitorLabel} monitor only.`;
-  if (outcome) return "The recorded graph connects this region to the task outcome only.";
-  return "The recorded graph does not connect this region to either recorded sink.";
-}
-
-function modeSentence(region: Region): string {
-  if (region.modes.length === 3) return "Observed in ordinary, control, and stale-image runs.";
-  const names = region.modes.map((mode) => mode === "stale" ? "stale-image" : mode);
-  return `Observed in ${names.join(" and ")} runs.`;
-}
-
-const behaviorDescriptions: Record<string, string> = {
-  "buffered-prior-policy-image": "uses a buffered image from an earlier policy step",
-  "convert-openvla-gripper-coordinate-to-libero-command": "converts OpenVLA's gripper coordinate into a LIBERO command",
-  "decode-and-unnormalize-action-tokens": "decodes and unnormalizes the generated action tokens",
-  "executed-command-from-clean-artifact": "replays the command from the paired clean rollout",
-  "forward-command-to-simulator-and-return-next-observation": "sends the command to the simulator and returns the next observation",
-  "monitor-results-attached-after-scoring": "attaches the monitor result after SAFE scoring",
-  "pinned-greedy-response-from-frozen-scoring-artifact": "uses the greedy response preserved by the pinned scoring run",
-  "no-intervention-applied": "records that no intervention was applied",
-  "preprocess-selected-image-and-task-prompt": "prepares the selected image and task prompt for the policy",
-  "record-applied-intervention": "records the intervention that was applied",
-  "record-libero-terminal-outcome": "records LIBERO's terminal task result",
-  "return-generated-sequences-and-hidden-states": "returns generated action sequences and hidden states",
-  "return-observation-after-prior-policy-command": "returns the observation produced after the prior command",
-  "return-second-to-last-vision-block-features": "returns features from the second-to-last vision block",
-  "safe-feature-from-clean-artifact": "replays SAFE's feature from the paired clean rollout",
-  "select-final-action-token-feature": "selects the final-layer feature for each action token",
-  "selected-policy-image": "records the image selected as policy input",
-  "set-pinned-initial-state-and-apply-configured-wait-steps": "pins the initial simulator state and applies the configured wait steps",
-  "recorded-policy-image-then-lossy-video-encode-and-rgb-decode": "derives the Qwen frame from the recorded policy image through the rollout video's lossy encode and RGB decode",
-  "all-frozen-query-alarms-in-policy-step-order": "collects every frozen Qwen alarm in policy-step order",
-  current_visual_observation_not_selected_by_stale_policy_input: "the current camera observation was not selected as policy input",
-  intentionally_discarded_final_vision_block: "the final vision block is intentionally not used",
-  not_applicable_clean_rollout: "no intervention applies to an ordinary rollout",
-  policy_inference_replaced_by_counterfactual_replay: "policy inference was replaced by paired counterfactual replay",
-};
-
-function describeBehavior(value: string): string {
-  return behaviorDescriptions[value] ?? value.replace(/[_-]+/g, " ");
-}
-
-function shortSymbol(value: string): string {
-  const parts = value.split(".");
-  if (parts.length < 2) return value;
-  const last = parts.at(-1)!;
-  const previous = parts.at(-2)!;
-  return /^[A-Z]/.test(previous) || last.startsWith("__") ? `${previous}.${last}` : last;
-}
-
-function sourceDescription(basis: string, region: Region): { kind: string; text: string } {
-  const qwenCode = basis.match(/^code:qwen@([^:]+):([^:]+):([^:]+):file-sha256-([a-f0-9]{64})$/);
-  if (qwenCode) {
-    const [, revision, implementation, method] = qwenCode;
-    return {
-      kind: "Implementation",
-      text: `Qwen3-VL-8B-Instruct revision ${revision} on Hugging Face, using ${shortSymbol(implementation)}.${method} from the exact recorded Transformers implementation.`,
-    };
-  }
-
-  const code = basis.match(/^code:([^@]+)@([^:]+):([^:]+):(.+)$/);
-  if (code) {
-    const [, repository, commit, symbol, behavior] = code;
-    const repositoryName: Record<string, string> = {
-      openvla: "OpenVLA",
-      libero: "LIBERO",
-      safe: "SAFE",
-      "embodied-silent-failures": "our experiment code",
-      "huggingface-transformers": "Hugging Face Transformers",
-      qwen: "Qwen",
-    };
-    return {
-      kind: "Implementation",
-      text: `${repositoryName[repository] ?? titleCase(repository)} commit ${commit}, in ${shortSymbol(symbol)}: ${describeBehavior(behavior)}.`,
-    };
-  }
-
-  const localCode = basis.match(/^code:([^:]+):([^:]+):(.+)$/);
-  if (localCode) {
-    const [, repository, symbol, behavior] = localCode;
-    const repositoryName = repository === "embodied-silent-failures" ? "Our experiment code" : titleCase(repository);
-    return {
-      kind: "Implementation",
-      text: `${repositoryName}, in ${shortSymbol(symbol)}: ${describeBehavior(behavior)}.`,
-    };
-  }
-
-  const paper = basis.match(/^paper:([^:]+):(.+)$/);
-  if (paper) {
-    const [, paperId, location] = paper;
-    if (paperId.startsWith("openvla") && location === "fig2") {
-      return { kind: "Paper", text: "The OpenVLA architecture in Figure 2." };
-    }
-    if (paperId.startsWith("safe") && location === "sec4.2+appendix-b.1+b.2") {
-      return { kind: "Paper", text: "The SAFE feature definition in Section 4.2 and Appendices B.1–B.2." };
-    }
-    if (paperId.startsWith("hide-and-seek") && location === "appendix-g.5") {
-      return { kind: "Paper", text: "The Qwen monitor described in Hide-and-Seek, Appendix G.5." };
-    }
-    return { kind: "Paper", text: "The corresponding architecture description in the cited paper." };
-  }
-
-  const observedModule = basis.match(/^observed:torch-module:(.+)$/);
-  if (observedModule) {
-    const moduleNames: Record<string, string> = {
-      "policy.language_model": "OpenVLA language model",
-      "policy.language_model.lm_head": "OpenVLA action-token output layer",
-      "policy.projector": "OpenVLA multimodal projector",
-      "policy.vision_backbone": "OpenVLA vision encoder",
-    };
-    const qwenModule = observedModule[1].startsWith("qwen_model.");
-    const moduleName = qwenModule
-      ? qwenIdentity(observedModule[1])
-      : moduleNames[observedModule[1]] ?? "corresponding OpenVLA module";
-    const statePath = region.semanticKey.split("/state/")[1];
-    if (statePath) {
-      const identity = stateIdentity(titleCase(region.name), statePath).replaceAll(" · ", ", ");
-      return { kind: "Runtime", text: `The runtime trace recorded this as registered model state at ${identity}.` };
-    }
-    const actionToken = region.semanticKey.match(/action_token_(\d+)$/);
-    const tokenContext = actionToken ? ` while generating action token ${actionToken[1]}` : " during policy execution";
-    const context = qwenModule ? " during Qwen monitor inference" : tokenContext;
-    return { kind: "Runtime", text: `The runtime trace attributed this computation to ${qwenModule ? "" : "the "}${moduleName}${context}.` };
-  }
-  if (basis === "observed:torch-dispatch-outside-module") {
-    return { kind: "Runtime", text: "Observed as a PyTorch operation outside a registered model module." };
-  }
-  if (basis === "observed:rollout-video:decoded-current-camera-frame") {
-    return { kind: "Artifact", text: "The camera frame decoded from the rollout video and fixed by its recorded RGB hash." };
-  }
-
-  const protocol = basis.match(/^protocol:([^:]+):(.+)$/);
-  if (protocol) {
-    const [, protocolId, behavior] = protocol;
-    const protocolNames: Record<string, string> = {
-      "counterfactual-replay-v1": "paired counterfactual protocol",
-      "evidence-graph-v1": "evidence capture protocol",
-      "rollout-evidence-v1": "rollout protocol",
-      "stale-image-v1": "stale-image protocol",
-      "qwen-observation-monitor-v1": "Qwen observation-monitor protocol",
-      "qwen-rollout-evidence-v1": "Qwen rollout-evidence protocol",
-    };
-    return {
-      kind: "Protocol",
-      text: `Our ${protocolNames[protocolId] ?? titleCase(protocolId)} ${describeBehavior(behavior)}.`,
-    };
-  }
-
-  return { kind: "Recorded source", text: titleCase(basis) };
+  return presentReachabilitySentence(region, view);
 }
 
 function detailRow(term: string, value: string): HTMLElement {
