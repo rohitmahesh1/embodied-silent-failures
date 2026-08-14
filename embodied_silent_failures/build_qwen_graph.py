@@ -17,9 +17,9 @@ from embodied_silent_failures.evidence_graph.qwen import (
 )
 from embodied_silent_failures.evidence_graph.record import Recorder
 from embodied_silent_failures.evidence_graph.reduce import reduce_graph
+from embodied_silent_failures.provenance import file_sha256, load_json
 from embodied_silent_failures.qwen_artifacts import (
     decode_selected_frames,
-    file_sha256,
     frame_sha256,
 )
 
@@ -36,13 +36,6 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--query-step", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser.parse_args()
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"expected a JSON object: {path}")
-    return value
 
 
 def _query(trial: dict[str, Any], policy_step: int) -> dict[str, Any]:
@@ -218,8 +211,8 @@ def build_query_graph(
 ) -> dict[str, Any]:
     trial_path = trial_path.resolve()
     run_path = run_path.resolve()
-    trial = _load_json(trial_path)
-    run = _load_json(run_path)
+    trial = load_json(trial_path)
+    run = load_json(run_path)
     query = _query(trial, policy_step)
 
     import cv2

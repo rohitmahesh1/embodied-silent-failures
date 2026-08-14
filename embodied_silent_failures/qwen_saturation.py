@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from embodied_silent_failures.qwen_artifacts import file_sha256, json_sha256, load_json
+from embodied_silent_failures.provenance import file_sha256, json_sha256, load_json
 
 
 SATURATION_BASIS = (

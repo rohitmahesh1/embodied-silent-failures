@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
-from embodied_silent_failures.qwen_artifacts import file_sha256
+from embodied_silent_failures.provenance import file_sha256
 
 
 SELECTION_BASIS = (

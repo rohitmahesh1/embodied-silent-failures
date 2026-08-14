@@ -2,7 +2,6 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,14 +28,18 @@ from embodied_silent_failures.evidence_graph.torch_trace import (
     capture_torch_operations,
     contract_issues as trace_contract_issues,
 )
+from embodied_silent_failures.provenance import (
+    file_sha256,
+    git_dirty,
+    git_revision,
+    load_json,
+    source_file_record,
+)
 from embodied_silent_failures.qwen_artifacts import (
     decode_selected_frames,
-    file_sha256,
     frame_sha256,
-    load_json,
     select_trace_query,
     snapshot_manifest,
-    source_file_record,
 )
 from embodied_silent_failures.qwen_saturation import coverage_record
 
@@ -66,28 +69,6 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--cache-dir", type=Path)
     return parser.parse_args()
-
-
-def _git_revision(path: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def _git_dirty(path: Path) -> bool:
-    result = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return bool(result.stdout.strip())
 
 
 def _implementation_basis(kind: str, revision: str, record: dict[str, Any]) -> str:
@@ -129,9 +110,9 @@ def _processed_input_records(inputs: Any, torch: Any) -> list[dict[str, Any]]:
 
 def load_trace_runtime(run_path: Path, cache_dir: Path | None = None) -> TraceRuntime:
     project_root = Path(__file__).resolve().parents[1]
-    if _git_dirty(project_root):
+    if git_dirty(project_root):
         raise ValueError("Qwen internal tracing requires a clean experiment repository")
-    revision = _git_revision(project_root)
+    revision = git_revision(project_root)
     run = load_json(run_path.resolve())
     protocol = run["configuration"]["protocol"]
     model_record = run["configuration"]["model"]

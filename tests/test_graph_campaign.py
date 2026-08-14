@@ -12,7 +12,7 @@ from embodied_silent_failures.prepare_qwen_rollout_graph_campaign import (
     SELECTION_BASIS,
     prepare_campaign,
 )
-from embodied_silent_failures.qwen_artifacts import file_sha256
+from embodied_silent_failures.provenance import file_sha256
 from embodied_silent_failures.run_graph_campaign import _run_stage
 
 

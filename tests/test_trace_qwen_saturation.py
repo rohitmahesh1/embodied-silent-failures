@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from embodied_silent_failures.artifacts import write_json_atomic
-from embodied_silent_failures.qwen_artifacts import file_sha256, load_json
+from embodied_silent_failures.provenance import file_sha256, load_json
 from embodied_silent_failures.qwen_saturation import select_saturation_queries
 from embodied_silent_failures.trace_qwen_saturation import run_campaign
 

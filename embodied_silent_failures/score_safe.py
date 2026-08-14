@@ -1,8 +1,6 @@
 import argparse
-import hashlib
 import json
 import math
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -10,6 +8,12 @@ from typing import Any, Sequence
 from embodied_silent_failures.analysis import Alarm, TREATMENT_CONDITIONS
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.evidence_graph.rollout import attach_monitor_timeline
+from embodied_silent_failures.provenance import (
+    file_sha256,
+    git_dirty,
+    git_revision,
+    load_json,
+)
 
 
 SAFE_REVISION = "b6036abe07b2b2bb9996afb2c07f13d6a9f507c0"
@@ -46,48 +50,10 @@ def _monitor_kind(model_name: str) -> str:
         raise ValueError(f"unsupported SAFE monitor model: {model_name}") from error
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as file:
-        value = json.load(file)
-    if not isinstance(value, dict):
-        raise ValueError(f"expected a JSON object in {path}")
-    return value
-
-
-def _git_revision(path: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def _git_dirty(path: Path) -> bool:
-    result = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return bool(result.stdout.strip())
-
-
 def _completion_results(run_dir: Path) -> dict[tuple[int, int], dict[str, Any]]:
     results = {}
     for path in sorted(run_dir.glob("*.complete.json")):
-        result = _load_json(path)
+        result = load_json(path)
         if result.get("status") != "complete":
             raise ValueError(f"fault result is not complete: {path}")
         if result.get("condition") not in TREATMENT_CONDITIONS:
@@ -173,14 +139,14 @@ def _validate_monitor(monitor_dir: Path) -> tuple[dict[str, Any], dict[str, Path
         if not path.is_file():
             raise FileNotFoundError(f"monitor {name} is not a file: {path}")
 
-    monitor = _load_json(paths["monitor"])
+    monitor = load_json(paths["monitor"])
     expected_hashes = {
         "checkpoint": monitor["checkpoint"]["sha256"],
         "configuration": monitor["configuration"]["sha256"],
         "split_manifest": monitor["split_manifest"]["sha256"],
     }
     for name, expected in expected_hashes.items():
-        actual = _sha256(paths[name])
+        actual = file_sha256(paths[name])
         if actual != expected:
             raise ValueError(
                 f"monitor {name} hash is {actual}, expected frozen hash {expected}"
@@ -193,10 +159,10 @@ def main() -> None:
     if args.batch_size <= 0:
         raise ValueError("batch size must be positive")
     project_root = Path(__file__).resolve().parents[1]
-    if _git_revision(args.safe_root) != SAFE_REVISION:
+    if git_revision(args.safe_root) != SAFE_REVISION:
         raise RuntimeError(f"SAFE must be checked out at {SAFE_REVISION}")
     for name, path in (("experiment code", project_root), ("SAFE", args.safe_root)):
-        if _git_dirty(path):
+        if git_dirty(path):
             raise RuntimeError(f"{name} has uncommitted changes: {path}")
     if not args.run_dirs:
         raise ValueError("at least one fault run directory is required")
@@ -233,7 +199,7 @@ def main() -> None:
     for label, run_dir in zip(labels, args.run_dirs):
         if not run_dir.is_dir():
             raise FileNotFoundError(f"fault run directory does not exist: {run_dir}")
-        run = _load_json(run_dir / "run.json")
+        run = load_json(run_dir / "run.json")
         if run.get("condition") not in TREATMENT_CONDITIONS:
             raise ValueError(
                 f"run metadata is not for a supported intervention: {run_dir}"
@@ -350,14 +316,14 @@ def main() -> None:
 
     output = {
         "schema_version": 2,
-        "experiment_code_revision": _git_revision(
+        "experiment_code_revision": git_revision(
             project_root
         ),
         "repository_states": {
             "experiment_code": {
-                "revision": _git_revision(project_root),
+                "revision": git_revision(project_root),
                 "dirty": False,
-                "score_safe_sha256": _sha256(Path(__file__)),
+                "score_safe_sha256": file_sha256(Path(__file__)),
             },
             "safe": {"revision": SAFE_REVISION, "dirty": False},
         },
@@ -365,10 +331,10 @@ def main() -> None:
             "directory": str(args.monitor_dir.resolve()),
             "kind": monitor_kind,
             "safe_model_name": safe_model_name,
-            "checkpoint_sha256": _sha256(monitor_paths["checkpoint"]),
-            "configuration_sha256": _sha256(monitor_paths["configuration"]),
-            "split_manifest_sha256": _sha256(monitor_paths["split_manifest"]),
-            "clean_score_archive_sha256": _sha256(monitor_paths["scores"]),
+            "checkpoint_sha256": file_sha256(monitor_paths["checkpoint"]),
+            "configuration_sha256": file_sha256(monitor_paths["configuration"]),
+            "split_manifest_sha256": file_sha256(monitor_paths["split_manifest"]),
+            "clean_score_archive_sha256": file_sha256(monitor_paths["scores"]),
             "primary_alpha": monitor["primary_alpha"],
         },
         "safe_revision": SAFE_REVISION,
@@ -380,7 +346,7 @@ def main() -> None:
         "alarm_windows": ALARM_WINDOWS,
         "score_archive": {
             "path": str(scores_path.resolve()),
-            "sha256": _sha256(scores_path),
+            "sha256": file_sha256(scores_path),
         },
         "records": records,
     }

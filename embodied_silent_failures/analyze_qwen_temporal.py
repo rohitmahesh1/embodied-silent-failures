@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from embodied_silent_failures.artifacts import write_json_atomic
-from embodied_silent_failures.qwen_artifacts import file_sha256
+from embodied_silent_failures.provenance import file_sha256
 
 
 BOOTSTRAP_SEED = 20260813

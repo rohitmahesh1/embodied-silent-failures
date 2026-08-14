@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
+from embodied_silent_failures.provenance import file_sha256
 
 
 TASK_IDS = tuple(range(10))
@@ -26,14 +27,6 @@ def _parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _records(directory: Path, condition: str) -> dict[tuple[int, int], dict[str, Any]]:
     records = {}
     for path in sorted(directory.glob("*.complete.json")):
@@ -43,7 +36,11 @@ def _records(directory: Path, condition: str) -> dict[tuple[int, int], dict[str,
         key = (int(value["task_id"]), int(value["episode_index"]))
         if key in records:
             raise ValueError(f"duplicate completion record for {key}")
-        records[key] = {**value, "_path": str(path.resolve()), "_sha256": _sha256(path)}
+        records[key] = {
+            **value,
+            "_path": str(path.resolve()),
+            "_sha256": file_sha256(path),
+        }
     return records
 
 
@@ -286,7 +283,7 @@ def main() -> None:
     stages.extend(paired)
     campaign = {
         "schema_version": 1,
-        "preparation_code_sha256": _sha256(Path(__file__)),
+        "preparation_code_sha256": file_sha256(Path(__file__)),
         "sampling_seed": args.sampling_seed,
         "design": {
             "census": "five successes and five failures per task, traced at step 100",
@@ -298,7 +295,7 @@ def main() -> None:
             "stale_dir": str(args.stale_dir.resolve()),
             "control_dir": str(args.control_dir.resolve()),
             "stale_source_manifest": str(args.stale_source_manifest.resolve()),
-            "stale_source_manifest_sha256": _sha256(args.stale_source_manifest),
+            "stale_source_manifest_sha256": file_sha256(args.stale_source_manifest),
         },
         "canary": _canary(args.stale_source_manifest, args.stale_dir, args.output_dir),
         "stages": stages,

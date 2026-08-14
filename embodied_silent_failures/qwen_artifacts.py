@@ -1,12 +1,15 @@
 import hashlib
-import inspect
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
+from embodied_silent_failures.provenance import (
+    file_sha256,
+    json_sha256,
+    load_json,
+)
 
 
 SOURCE_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*")
@@ -31,29 +34,6 @@ class TrialSource:
         return f"{self.source}--task{self.task_id}--ep{self.episode_index}"
 
 
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(4 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def json_sha256(value: Any) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as file:
-        value = json.load(file)
-    if not isinstance(value, dict):
-        raise ValueError(f"expected a JSON object in {path}")
-    return value
-
-
 def snapshot_manifest(snapshot: Path) -> dict[str, Any]:
     entries = []
     for path in sorted(item for item in snapshot.rglob("*") if item.is_file()):
@@ -67,18 +47,6 @@ def snapshot_manifest(snapshot: Path) -> dict[str, Any]:
     if not entries:
         raise ValueError(f"model snapshot contains no files: {snapshot}")
     return {"files": entries, "sha256": json_sha256(entries)}
-
-
-def source_file_record(value: Any) -> dict[str, Any]:
-    path_value = inspect.getsourcefile(type(value))
-    if path_value is None:
-        raise RuntimeError(f"cannot locate source for {type(value).__qualname__}")
-    path = Path(path_value).resolve()
-    return {
-        "class": f"{type(value).__module__}.{type(value).__qualname__}",
-        "path": str(path),
-        "sha256": file_sha256(path),
-    }
 
 
 def select_trace_query(

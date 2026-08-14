@@ -43,6 +43,12 @@ from embodied_silent_failures.plan import (
     parse_task_ids,
     seed_for_trial,
 )
+from embodied_silent_failures.provenance import (
+    file_sha256,
+    git_dirty,
+    git_revision,
+    git_state,
+)
 from embodied_silent_failures.replay import (
     CleanTrace,
     load_clean_trace,
@@ -305,17 +311,6 @@ def _image_fault_applied(spec: StaleImageSpec, mode: str, policy_step: int) -> b
     return mode == "stale" and policy_step == spec.policy_step
 
 
-def _git_revision(path: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
 def _validate_inputs(args: Arguments) -> None:
     fault_spec = _fault_spec(args)
     has_fault = fault_spec is not None or args.fault_manifest is not None
@@ -357,8 +352,8 @@ def _validate_inputs(args: Arguments) -> None:
         )
 
     revisions = {
-        "OpenVLA": (_git_revision(args.openvla_root), OPENVLA_REVISION),
-        "LIBERO": (_git_revision(args.libero_root), LIBERO_REVISION),
+        "OpenVLA": (git_revision(args.openvla_root), OPENVLA_REVISION),
+        "LIBERO": (git_revision(args.libero_root), LIBERO_REVISION),
     }
     for name, (actual, expected) in revisions.items():
         if actual != expected:
@@ -370,7 +365,7 @@ def _validate_inputs(args: Arguments) -> None:
         "LIBERO": args.libero_root,
     }
     for name, path in repositories.items():
-        if _git_dirty(path):
+        if git_dirty(path):
             raise RuntimeError(f"{name} has uncommitted changes: {path}")
 
     if sys.version_info[:2] != (3, 10):
@@ -460,14 +455,8 @@ def _model_config(args: Arguments) -> SimpleNamespace:
     )
 
 
-def _sha256(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _optional_file_sha256(path: Path) -> str | None:
+    return file_sha256(path) if path.is_file() else None
 
 
 def _array_sha256(runtime: Runtime, value: Any) -> str:
@@ -498,57 +487,13 @@ def _nvidia_smi() -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _git_dirty(path: Path) -> bool:
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return bool(result.stdout.strip())
-
-
-def _git_state(path: Path) -> dict[str, Any]:
-    status = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    diff = subprocess.run(
-        ["git", "diff", "--binary", "HEAD"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-    ).stdout
-    digest = hashlib.sha256()
-    digest.update(status.encode("utf-8"))
-    digest.update(diff)
-    for line in status.splitlines():
-        if not line.startswith("?? "):
-            continue
-        relative = line[3:]
-        untracked = path / relative
-        if untracked.is_file():
-            digest.update(relative.encode("utf-8"))
-            with untracked.open("rb") as file:
-                for chunk in iter(lambda: file.read(1024 * 1024), b""):
-                    digest.update(chunk)
-    return {
-        "revision": _git_revision(path),
-        "dirty": bool(status.strip()),
-        "worktree_sha256": digest.hexdigest(),
-    }
-
-
 def _evidence_code_hashes(project_root: Path) -> dict[str, str | None]:
     directory = project_root / "embodied_silent_failures" / "evidence_graph"
     paths = [
         project_root / "embodied_silent_failures" / name
         for name in (
             "faults.py",
+            "provenance.py",
             "qwen_artifacts.py",
             "run_openvla.py",
             "score_qwen.py",
@@ -557,7 +502,7 @@ def _evidence_code_hashes(project_root: Path) -> dict[str, str | None]:
     ]
     paths.extend(sorted(directory.glob("*.py")))
     return {
-        str(path.relative_to(project_root)): _sha256(path)
+        str(path.relative_to(project_root)): _optional_file_sha256(path)
         for path in paths
     }
 
@@ -636,9 +581,9 @@ def _run_metadata(
 
     project_root = Path(__file__).resolve().parents[1]
     repository_states = {
-        "experiment_code": _git_state(project_root),
-        "openvla": _git_state(args.openvla_root),
-        "libero": _git_state(args.libero_root),
+        "experiment_code": git_state(project_root),
+        "openvla": git_state(args.openvla_root),
+        "libero": git_state(args.libero_root),
     }
     return {
         "schema_version": 1,
@@ -662,19 +607,21 @@ def _run_metadata(
         "evidence_graph_code_sha256": _evidence_code_hashes(project_root),
         "checkpoint_manifest": _checkpoint_manifest(args.checkpoint),
         "checkpoint_files": {
-            "config.json": _sha256(args.checkpoint / "config.json"),
-            "dataset_statistics.json": _sha256(
+            "config.json": _optional_file_sha256(args.checkpoint / "config.json"),
+            "dataset_statistics.json": _optional_file_sha256(
                 args.checkpoint / "dataset_statistics.json"
             ),
         },
         "trial_manifest_sha256": (
-            _sha256(args.trial_manifest) if args.trial_manifest else None
+            file_sha256(args.trial_manifest) if args.trial_manifest else None
         ),
         "fault_manifest_sha256": (
-            _sha256(args.fault_manifest) if args.fault_manifest else None
+            file_sha256(args.fault_manifest) if args.fault_manifest else None
         ),
         "stale_image_manifest_sha256": (
-            _sha256(args.stale_image_manifest) if args.stale_image_manifest else None
+            file_sha256(args.stale_image_manifest)
+            if args.stale_image_manifest
+            else None
         ),
         "machine": {
             "hostname": socket.gethostname(),

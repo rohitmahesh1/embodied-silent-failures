@@ -8,7 +8,7 @@ from embodied_silent_failures.analyze_qwen_temporal import (
     _exact_sign_flip,
     analyze,
 )
-from embodied_silent_failures.qwen_artifacts import file_sha256
+from embodied_silent_failures.provenance import file_sha256
 
 
 class QwenTemporalAnalysisTests(unittest.TestCase):

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
+from embodied_silent_failures.provenance import load_json
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -53,13 +54,6 @@ def _parse_arguments() -> argparse.Namespace:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"expected a JSON object: {path}")
-    return value
 
 
 def _terminal_counts(output_dir: Path) -> tuple[int, int]:
@@ -165,13 +159,13 @@ def _validate_stage(
 
     completed = []
     for path in complete_paths:
-        result = _load_json(path)
+        result = load_json(path)
         evidence = result.get("evidence_graph")
         if not isinstance(evidence, dict) or evidence.get("audit_passed") is not True:
             raise ValueError(f"completion has no passing evidence audit: {path}")
         directory = evidence_dir / f"task{result['task_id']}--ep{result['episode_index']}"
-        audit = _load_json(directory / "audit.json")
-        composition = _load_json(directory / "composition.json")
+        audit = load_json(directory / "audit.json")
+        composition = load_json(directory / "composition.json")
         if audit.get("passed") is not True:
             raise ValueError(f"evidence audit did not pass: {directory}")
         requested = sorted(int(value) for value in stage["trace_steps"])
@@ -183,7 +177,7 @@ def _validate_stage(
 
     excluded = []
     for path in excluded_paths:
-        result = _load_json(path)
+        result = load_json(path)
         excluded.append([int(result["task_id"]), int(result["episode_index"])])
     if "expected_complete" in stage and sorted(completed) != sorted(stage["expected_complete"]):
         raise ValueError("canary completion set does not match its frozen expectation")
@@ -300,7 +294,7 @@ def _run_stage(
 
 def main() -> None:
     args = _parse_arguments()
-    campaign = _load_json(args.campaign_dir / "campaign.json")
+    campaign = load_json(args.campaign_dir / "campaign.json")
     args.output_root.mkdir(parents=True, exist_ok=True)
     lock_path = args.campaign_dir / "campaign.lock"
     lock = lock_path.open("w", encoding="utf-8")
@@ -310,7 +304,7 @@ def main() -> None:
         raise RuntimeError("another campaign process holds the campaign lock") from error
 
     if args.require_canary:
-        canary_status = _load_json(args.campaign_dir / "canary-status.json")
+        canary_status = load_json(args.campaign_dir / "canary-status.json")
         if canary_status.get("state") != "complete":
             raise RuntimeError("the campaign requires a passing canary")
 

@@ -11,6 +11,7 @@ from typing import Any
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.faults import FaultSpec, TransientActivationFault
 from embodied_silent_failures.plan import load_trial_manifest, seed_for_trial
+from embodied_silent_failures.provenance import file_sha256, git_revision
 from embodied_silent_failures.replay import (
     CleanTrace,
     load_clean_trace,
@@ -23,11 +24,9 @@ from embodied_silent_failures.run_openvla import (
     OPENVLA_REVISION,
     REPLAY_OBSERVATION_TOLERANCE,
     _array_sha256,
-    _git_revision,
     _load_runtime,
     _model_config,
     _paired_clean_results,
-    _sha256,
 )
 from embodied_silent_failures.score_safe import SAFE_REVISION, _validate_monitor
 
@@ -122,7 +121,7 @@ def _step_environment(env: Any, action: Any) -> tuple[dict[str, Any], bool, Any,
 
 
 def _load_safe_monitor(safe_root: Path, monitor_dir: Path, torch: Any) -> Any:
-    if _git_revision(safe_root) != SAFE_REVISION:
+    if git_revision(safe_root) != SAFE_REVISION:
         raise RuntimeError(f"SAFE must be checked out at {SAFE_REVISION}")
     _, paths = _validate_monitor(monitor_dir)
     sys.path.insert(0, str(safe_root.resolve()))
@@ -432,8 +431,8 @@ def main() -> None:
     if CHECKPOINT_REVISION not in args.checkpoint.resolve().parts:
         raise RuntimeError("probe requires the pinned OpenVLA checkpoint")
     revisions = {
-        "OpenVLA": (_git_revision(args.openvla_root), OPENVLA_REVISION),
-        "LIBERO": (_git_revision(args.libero_root), LIBERO_REVISION),
+        "OpenVLA": (git_revision(args.openvla_root), OPENVLA_REVISION),
+        "LIBERO": (git_revision(args.libero_root), LIBERO_REVISION),
     }
     for name, (actual, expected) in revisions.items():
         if actual != expected:
@@ -608,7 +607,7 @@ def main() -> None:
             "calibration": {
                 "clean_directory": str(args.calibration_clean_dir.resolve()),
                 "split_manifest": str(args.calibration_split.resolve()),
-                "split_manifest_sha256": _sha256(args.calibration_split),
+                "split_manifest_sha256": file_sha256(args.calibration_split),
                 "split": "train",
                 "rollout_count": bounds["rollout_count"],
                 "step_count": bounds["step_count"],

@@ -6,6 +6,7 @@ from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.plan import load_trial_manifest, seed_for_trial
+from embodied_silent_failures.provenance import file_sha256, git_revision
 from embodied_silent_failures.probe_openvla import (
     _load_feature_bounds,
     _load_safe_monitor,
@@ -24,11 +25,9 @@ from embodied_silent_failures.run_openvla import (
     OPENVLA_REVISION,
     REPLAY_OBSERVATION_TOLERANCE,
     _array_sha256,
-    _git_revision,
     _load_runtime,
     _model_config,
     _paired_clean_results,
-    _sha256,
 )
 
 
@@ -206,8 +205,8 @@ def main() -> None:
     if CHECKPOINT_REVISION not in args.checkpoint.resolve().parts:
         raise RuntimeError("probe requires the pinned OpenVLA checkpoint")
     for name, actual, expected in (
-        ("OpenVLA", _git_revision(args.openvla_root), OPENVLA_REVISION),
-        ("LIBERO", _git_revision(args.libero_root), LIBERO_REVISION),
+        ("OpenVLA", git_revision(args.openvla_root), OPENVLA_REVISION),
+        ("LIBERO", git_revision(args.libero_root), LIBERO_REVISION),
     ):
         if actual != expected:
             raise RuntimeError(f"{name} revision is {actual}, expected {expected}")
@@ -378,7 +377,7 @@ def main() -> None:
             "calibration": {
                 "clean_directory": str(args.calibration_clean_dir.resolve()),
                 "split_manifest": str(args.calibration_split.resolve()),
-                "split_manifest_sha256": _sha256(args.calibration_split),
+                "split_manifest_sha256": file_sha256(args.calibration_split),
                 "split": "train",
                 "rollout_count": bounds["rollout_count"],
                 "step_count": bounds["step_count"],

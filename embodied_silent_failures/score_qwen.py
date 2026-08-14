@@ -2,7 +2,6 @@ import argparse
 import importlib.metadata
 import json
 import re
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -22,16 +21,20 @@ from embodied_silent_failures.evidence_graph.qwen import (
     selected_frame_steps,
     trajectory_prediction,
 )
+from embodied_silent_failures.provenance import (
+    file_sha256,
+    git_dirty,
+    git_revision,
+    json_sha256,
+    source_file_record,
+)
 from embodied_silent_failures.qwen_artifacts import (
     TrialSource,
     decode_selected_frames,
-    file_sha256,
     frame_sha256,
-    json_sha256,
     load_trial_manifest,
     prepare_output,
     snapshot_manifest,
-    source_file_record,
     trial_checkpoint,
 )
 
@@ -62,28 +65,6 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
-
-
-def _git_revision(path: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def _git_dirty(path: Path) -> bool:
-    result = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return bool(result.stdout.strip())
 
 
 def _processor_configuration(processor: Any) -> dict[str, Any]:
@@ -231,7 +212,7 @@ def main() -> None:
             f"Transformers is {installed_transformers}, expected {args.transformers_version}"
         )
     project_root = Path(__file__).resolve().parents[1]
-    if _git_dirty(project_root):
+    if git_dirty(project_root):
         raise RuntimeError(f"experiment code has uncommitted changes: {project_root}")
     manifest, trials = load_trial_manifest(args.trial_manifest.resolve())
 
@@ -290,7 +271,7 @@ def main() -> None:
         "configuration_sha256": configuration_sha256,
         "configuration": configuration,
         "repository_state": {
-            "revision": _git_revision(project_root),
+            "revision": git_revision(project_root),
             "dirty": False,
             "score_qwen_sha256": file_sha256(Path(__file__)),
         },

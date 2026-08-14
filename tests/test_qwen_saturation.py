@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from embodied_silent_failures.qwen_artifacts import file_sha256
+from embodied_silent_failures.provenance import file_sha256
 from embodied_silent_failures.qwen_saturation import (
     STRATA,
     coverage_novelty,
