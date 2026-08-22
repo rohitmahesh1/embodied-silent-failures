@@ -231,6 +231,31 @@ def _prepare_run(args: argparse.Namespace, plan: list[Trial]) -> dict[str, Any]:
     return existing
 
 
+def running_status(
+    output_dir: Path,
+    planned_trials: int,
+    campaign_started: str,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    trial = update.get("trial")
+    trial_progress = update.get("state")
+    value = {
+        "schema_version": 1,
+        "state": "running",
+        "started_at": campaign_started,
+        "updated_at": _now(),
+        "planned_trials": planned_trials,
+        "completed_trials": len(list(output_dir.glob("*.complete.json"))),
+        "unresolved_trials": len(list(output_dir.glob("*.unresolved.json"))),
+        **{key: item for key, item in update.items() if key not in {"state", "trial"}},
+    }
+    if trial_progress is not None:
+        value["trial_progress"] = trial_progress
+    if isinstance(trial, Trial):
+        value["trial"] = trial.to_dict()
+    return value
+
+
 def main() -> None:
     args = _arguments()
     _validate_environment(args)
@@ -250,20 +275,10 @@ def main() -> None:
     campaign_started = _now()
 
     def write_status(update: dict[str, Any]) -> None:
-        trial = update.get("trial")
-        value = {
-            "schema_version": 1,
-            "state": "running",
-            "started_at": campaign_started,
-            "updated_at": _now(),
-            "planned_trials": len(plan),
-            "completed_trials": len(list(args.output_dir.glob("*.complete.json"))),
-            "unresolved_trials": len(list(args.output_dir.glob("*.unresolved.json"))),
-            **{key: value for key, value in update.items() if key != "trial"},
-        }
-        if isinstance(trial, Trial):
-            value["trial"] = trial.to_dict()
-        write_json_atomic(status_path, value)
+        write_json_atomic(
+            status_path,
+            running_status(args.output_dir, len(plan), campaign_started, update),
+        )
 
     def already_complete(trial: Trial) -> bool:
         try:
@@ -324,7 +339,7 @@ def main() -> None:
                         "trial": trial,
                         "attempt": attempt,
                         "trial_state": heartbeat_value,
-                        "free_gb_before_trial": free_gb,
+                        "filesystem_reported_free_gb_before_trial": free_gb,
                     }
                 )
             return_code = active_trial.wait()

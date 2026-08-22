@@ -1,4 +1,5 @@
 import ast
+import json
 import pickle
 import tempfile
 import unittest
@@ -27,6 +28,7 @@ from embodied_silent_failures.pi05_rollout import (
     run_trial,
     validate_policy_response,
 )
+from embodied_silent_failures.run_pi05 import running_status
 from embodied_silent_failures.plan import Trial
 from embodied_silent_failures.pi05_supervisor import (
     InfrastructureError,
@@ -234,6 +236,24 @@ class Pi05ContractTests(unittest.TestCase):
 
 
 class Pi05SupervisorTests(unittest.TestCase):
+    def test_running_status_does_not_confuse_trial_and_campaign_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            (output_dir / "task0--ep0.complete.json").write_text(
+                json.dumps({"status": "complete"}), encoding="utf-8"
+            )
+            status = running_status(
+                output_dir,
+                planned_trials=20,
+                campaign_started="start",
+                update={"state": "complete", "trial": Trial(0, 0), "index": 1},
+            )
+
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(status["trial_progress"], "complete")
+        self.assertEqual(status["trial"], {"task_id": 0, "episode_index": 0})
+        self.assertEqual(status["completed_trials"], 1)
+
     def test_one_unresolved_trial_does_not_stop_later_trials(self):
         plan = [Trial(0, 0), Trial(0, 1), Trial(0, 2)]
         calls = []
