@@ -1,5 +1,10 @@
+from __future__ import annotations
+
+import csv
+import hashlib
 import json
 import os
+import pickle
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -31,6 +36,79 @@ def write_json_atomic(path: Path, value: Any) -> None:
         temporary_path.replace(path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def temporary_path(path: Path) -> Path:
+    return path.with_name(f".{path.stem}.{uuid4().hex}.tmp{path.suffix}")
+
+
+def write_csv_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        raise ValueError("cannot write an empty rollout log")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = temporary_path(path)
+    try:
+        with pending.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+            file.flush()
+            os.fsync(file.fileno())
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def write_pickle_atomic(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = temporary_path(path)
+    try:
+        with pending.open("wb") as file:
+            pickle.dump(value, file, protocol=pickle.HIGHEST_PROTOCOL)
+            file.flush()
+            os.fsync(file.fileno())
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def artifact_record(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "name": path.name,
+        "bytes": path.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _validate_artifact_manifest(
+    output_dir: Path, marker: Path, result: dict[str, Any]
+) -> None:
+    manifest = result.get("artifact_manifest")
+    if manifest is None:
+        return
+    if not isinstance(manifest, list) or not manifest:
+        raise ValueError(
+            f"completion marker has an invalid artifact manifest: {marker}"
+        )
+    for record in manifest:
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+            raise ValueError(
+                f"completion marker has an invalid artifact record: {marker}"
+            )
+        path = output_dir / record["name"]
+        if path.name != record["name"] or not path.is_file():
+            raise FileNotFoundError(
+                f"completion marker references a missing artifact: {path}"
+            )
+        actual = artifact_record(path)
+        if actual != record:
+            raise ValueError(
+                f"artifact size or digest disagrees with completion marker: {path}"
+            )
 
 
 def prepare_trial(
@@ -67,6 +145,7 @@ def prepare_trial(
             raise FileNotFoundError(
                 f"completion marker references missing artifacts {missing}: {marker}"
             )
+        _validate_artifact_manifest(output_dir, marker, result)
         evidence = result.get("evidence_graph")
         if evidence is not None:
             if not isinstance(evidence, dict):

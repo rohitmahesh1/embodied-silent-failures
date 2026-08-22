@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from embodied_silent_failures.artifacts import (
+    artifact_record,
     completion_path,
     exclusion_path,
     prepare_trial,
@@ -158,6 +159,37 @@ class ArtifactTests(unittest.TestCase):
                 {"a": 1, "b": 2},
             )
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_prepare_trial_validates_content_addressed_artifacts(self) -> None:
+        trial = Trial(task_id=4, episode_index=2)
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            csv_path = output_dir / "task4--ep2--succ1.csv"
+            pickle_path = output_dir / "task4--ep2--succ1.pkl"
+            csv_path.write_text("row\n", encoding="utf-8")
+            pickle_path.write_bytes(b"evidence")
+            write_json_atomic(
+                completion_path(output_dir, trial),
+                {
+                    "status": "complete",
+                    "task_id": 4,
+                    "episode_index": 2,
+                    "files": {
+                        "csv": csv_path.name,
+                        "pickle": pickle_path.name,
+                        "video": None,
+                    },
+                    "artifact_manifest": [
+                        artifact_record(csv_path),
+                        artifact_record(pickle_path),
+                    ],
+                },
+            )
+
+            self.assertEqual(prepare_trial(output_dir, trial, True), "complete")
+            pickle_path.write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                prepare_trial(output_dir, trial, True)
 
 
 if __name__ == "__main__":

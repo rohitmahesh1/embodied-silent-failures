@@ -1,18 +1,18 @@
-import csv
 import os
-import pickle
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 from embodied_silent_failures.artifacts import (
     completion_path,
     safe_stem,
+    temporary_path,
+    write_csv_atomic,
     write_json_atomic,
+    write_pickle_atomic,
 )
 from embodied_silent_failures.evidence_graph.rollout import RolloutEvidence
 from embodied_silent_failures.faults import TransientActivationFault
@@ -123,38 +123,6 @@ def _python_value(runtime: Runtime, value: Any) -> Any:
     if isinstance(value, runtime.np.generic):
         return value.item()
     return value
-
-
-def _temporary_path(path: Path) -> Path:
-    return path.with_name(f".{path.stem}.{uuid4().hex}.tmp{path.suffix}")
-
-
-def _write_csv_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        raise ValueError("cannot write an empty rollout log")
-    temporary_path = _temporary_path(path)
-    try:
-        with temporary_path.open("w", encoding="utf-8", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=list(rows[0]))
-            writer.writeheader()
-            writer.writerows(rows)
-            file.flush()
-            os.fsync(file.fileno())
-        temporary_path.replace(path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
-
-
-def _write_pickle_atomic(path: Path, value: Any) -> None:
-    temporary_path = _temporary_path(path)
-    try:
-        with temporary_path.open("wb") as file:
-            pickle.dump(value, file, protocol=pickle.HIGHEST_PROTOCOL)
-            file.flush()
-            os.fsync(file.fileno())
-        temporary_path.replace(path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
 
 
 def _extract_hidden_states(runtime: Runtime, generated: Any) -> Any:
@@ -455,9 +423,9 @@ def run_trial(
     video_path = config.output_dir / f"{stem}.mp4"
 
     artifact_started = time.perf_counter()
-    _write_csv_atomic(csv_path, rows)
+    write_csv_atomic(csv_path, rows)
     if config.save_video:
-        temporary_video = _temporary_path(video_path)
+        temporary_video = temporary_path(video_path)
         try:
             runtime.save_video(replay_images, temporary_video)
             temporary_video.replace(video_path)
@@ -465,7 +433,7 @@ def run_trial(
             temporary_video.unlink(missing_ok=True)
 
     hidden_states = runtime.torch.stack(hidden_history, dim=0)
-    _write_pickle_atomic(
+    write_pickle_atomic(
         pickle_path,
         {
             "hidden_states": hidden_states,
