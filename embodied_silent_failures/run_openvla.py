@@ -78,6 +78,8 @@ EXPECTED_PACKAGES = {
     "numpy": "1.26.3",
     "protobuf": "3.20.3",
     "robosuite": "1.4.0",
+    "scikit-learn": "1.5.2",
+    "scipy": "1.11.4",
     "tensorflow": "2.15.0",
     "tensorflow-datasets": "4.9.3",
     "tensorflow-metadata": "1.15.0",
