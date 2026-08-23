@@ -126,11 +126,14 @@ class Pi05ContractTests(unittest.TestCase):
         ):
             path = project_root / "embodied_silent_failures" / name
             with self.subTest(name=name):
+                source = path.read_text(encoding="utf-8")
                 ast.parse(
-                    path.read_text(encoding="utf-8"),
+                    source,
                     filename=str(path),
                     feature_version=(3, 8),
                 )
+                if name in ("run_pi05_pair_trial.py", "run_pi05_trial.py"):
+                    self.assertNotIn("BooleanOptionalAction", source)
 
     def test_noise_identity_is_stable_and_decision_specific(self):
         trial = Trial(3, 8)

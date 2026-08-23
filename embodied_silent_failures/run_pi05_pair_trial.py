@@ -43,9 +43,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--wait-steps", type=int, default=10)
     parser.add_argument("--replan-steps", type=int, default=5)
-    parser.add_argument(
-        "--save-video", action=argparse.BooleanOptionalAction, default=True
-    )
+    parser.add_argument("--save-video", dest="save_video", action="store_true")
+    parser.add_argument("--no-save-video", dest="save_video", action="store_false")
+    parser.set_defaults(save_video=True)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
