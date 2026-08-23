@@ -23,6 +23,7 @@ from embodied_silent_failures.pi05_contract import (
     validate_replan_steps,
 )
 from embodied_silent_failures.pi05_policy import REQUEST_KEY
+from embodied_silent_failures.pi05_safe_data import reduce_pre_velocity
 from embodied_silent_failures.pi05_rollout import (
     RolloutConfig,
     run_trial,
@@ -34,6 +35,7 @@ from embodied_silent_failures.pi05_supervisor import (
     InfrastructureError,
     execute_resilient_plan,
 )
+from embodied_silent_failures.train_pi05_safe import published_configuration
 
 
 def _response(decision_id, noise_seed, compare_reference=False):
@@ -106,11 +108,18 @@ class Pi05ContractTests(unittest.TestCase):
         for name in (
             "artifacts.py",
             "pi05_contract.py",
+            "pi05_pair.py",
             "pi05_policy.py",
             "pi05_rollout.py",
+            "pi05_safe_data.py",
+            "pi05_stale_manifest.py",
             "plan.py",
             "provenance.py",
+            "run_pi05_pair_trial.py",
+            "run_pi05_pairs.py",
             "run_pi05_trial.py",
+            "score_pi05_safe.py",
+            "train_pi05_safe.py",
         ):
             path = project_root / "embodied_silent_failures" / name
             with self.subTest(name=name):
@@ -143,6 +152,25 @@ class Pi05ContractTests(unittest.TestCase):
         for value in (0, 11):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_replan_steps(value)
+
+    @unittest.skipIf(np is None, "NumPy is installed in the pi0.5 runtime")
+    def test_safe_reduction_uses_first_horizon_and_final_diffusion(self):
+        values = np.arange(3 * 4 * 5 * 2, dtype=np.float32).reshape(3, 4, 5, 2)
+
+        selected = reduce_pre_velocity(values, np)
+
+        np.testing.assert_array_equal(selected, values[:, -1, 0, :])
+
+    def test_safe_configuration_matches_published_pi0_mlp(self):
+        config = published_configuration()
+
+        self.assertEqual(config["dataset"]["horizon_idx_rel"], 0.0)
+        self.assertEqual(config["dataset"]["diff_idx_rel"], 1.0)
+        self.assertEqual(config["model"]["name"], "indep")
+        self.assertEqual(config["model"]["n_layers"], 2)
+        self.assertEqual(config["model"]["hidden_dim"], 256)
+        self.assertEqual(config["model"]["lr"], 3e-5)
+        self.assertEqual(config["model"]["lambda_reg"], 1e-3)
 
     @unittest.skipIf(np is None, "NumPy is installed in the pi0.5 runtime")
     def test_response_validation_requires_exact_evidence_identity(self):

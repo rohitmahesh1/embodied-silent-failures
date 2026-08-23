@@ -146,6 +146,18 @@ def _rate(numerator: int, denominator: int) -> dict[str, Any]:
     }
 
 
+def exact_binomial_two_sided(left: int, right: int) -> float | None:
+    """Return the exact two-sided sign-test p-value for paired discordance."""
+    if left < 0 or right < 0:
+        raise ValueError("discordant counts must be non-negative")
+    discordant = left + right
+    if discordant == 0:
+        return None
+    smaller = min(left, right)
+    lower_tail = sum(math.comb(discordant, index) for index in range(smaller + 1))
+    return min(1.0, 2.0 * lower_tail / (2**discordant))
+
+
 def summarize_outcomes(outcomes: Iterable[PairedOutcome]) -> dict[str, Any]:
     values = list(outcomes)
     counts = Counter(outcome.category for outcome in values)

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
+from embodied_silent_failures.analysis import exact_binomial_two_sided
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -56,12 +57,7 @@ def _rows(result: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _exact_binomial_two_sided(left: int, right: int) -> float | None:
-    discordant = left + right
-    if discordant == 0:
-        return None
-    smaller = min(left, right)
-    lower_tail = sum(math.comb(discordant, k) for k in range(smaller + 1))
-    return min(1.0, 2.0 * lower_tail / (2**discordant))
+    return exact_binomial_two_sided(left, right)
 
 
 def _wilson(
