@@ -35,7 +35,10 @@ from embodied_silent_failures.pi05_supervisor import (
     InfrastructureError,
     execute_resilient_plan,
 )
-from embodied_silent_failures.train_pi05_safe import published_configuration
+from embodied_silent_failures.train_pi05_safe import (
+    _functional_band_row,
+    published_configuration,
+)
 
 
 def _response(decision_id, noise_seed, compare_reference=False):
@@ -172,6 +175,16 @@ class Pi05ContractTests(unittest.TestCase):
         self.assertEqual(config["model"]["hidden_dim"], 256)
         self.assertEqual(config["model"]["lr"], 3e-5)
         self.assertEqual(config["model"]["lambda_reg"], 1e-3)
+
+    @unittest.skipIf(np is None, "NumPy is installed in the pi0.5 runtime")
+    def test_safe_functional_band_removes_only_the_regression_axis(self):
+        values = np.arange(6, dtype=np.float32)[None]
+
+        np.testing.assert_array_equal(
+            _functional_band_row(values, 6, np), values[0]
+        )
+        with self.assertRaisesRegex(ValueError, "unexpected band shape"):
+            _functional_band_row(np.zeros((2, 6), dtype=np.float32), 6, np)
 
     @unittest.skipIf(np is None, "NumPy is installed in the pi0.5 runtime")
     def test_response_validation_requires_exact_evidence_identity(self):

@@ -220,6 +220,21 @@ def _clean_alarm_metrics(
     return result
 
 
+def _functional_band_row(band: Any, maximum_length: int, np: Any) -> Any:
+    values = np.asarray(band)
+    # SAFE b6036ab, failure_prob/utils/conformal/functional_predictor.py::
+    # get_one_sided_prediction_band, returns one regression row and
+    # failure_prob/utils/metrics.py broadcasts that (1, time) row over rollouts.
+    if values.shape == (1, maximum_length):
+        values = values[0]
+    if values.shape != (maximum_length,):
+        raise ValueError(
+            "functional calibration returned an unexpected band shape: "
+            f"{values.shape}"
+        )
+    return values
+
+
 def _functional_bands(
     calibration_rollouts: list[Any],
     calibration_scores: list[Any],
@@ -265,6 +280,7 @@ def _functional_bands(
             alpha,
             lower_bound=False,
         )
+        band = _functional_band_row(band, maximum_length, np)
         if not np.isfinite(band).all():
             raise ValueError("functional calibration produced a non-finite band")
         bands.append(band)
