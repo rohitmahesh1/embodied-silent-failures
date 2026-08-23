@@ -43,6 +43,8 @@ class RunTests(unittest.TestCase):
             fault_manifest=None,
             stale_image_manifest=None,
             image_input_mode="stale",
+            freshness_gate="none",
+            freshness_response="observe",
             fault_layer=None,
             fault_policy_step=None,
             fault_generation_step=0,

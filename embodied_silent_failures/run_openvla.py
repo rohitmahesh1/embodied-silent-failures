@@ -17,15 +17,19 @@ from embodied_silent_failures.artifacts import (
     prepare_trial,
     write_json_atomic,
 )
+from embodied_silent_failures.evidence_graph.rollout import (
+    RolloutEvidence,
+    prepare_evidence_output,
+    summarize_saturation,
+)
 from embodied_silent_failures.faults import (
     FAULT_SITES,
     FaultSpec,
     TransientActivationFault,
 )
-from embodied_silent_failures.evidence_graph.rollout import (
-    RolloutEvidence,
-    prepare_evidence_output,
-    summarize_saturation,
+from embodied_silent_failures.freshness import (
+    FRESHNESS_GATES,
+    FRESHNESS_RESPONSES,
 )
 from embodied_silent_failures.fault_manifest import load_fault_manifest
 from embodied_silent_failures.openvla_rollout import (
@@ -103,6 +107,8 @@ class Arguments:
     fault_manifest: Path | None
     stale_image_manifest: Path | None
     image_input_mode: str
+    freshness_gate: str
+    freshness_response: str
     fault_layer: int | None
     fault_policy_step: int | None
     fault_generation_step: int
@@ -144,6 +150,16 @@ def _parse_arguments() -> Arguments:
         "--image-input-mode",
         choices=("stale", "current_control"),
         default="stale",
+    )
+    parser.add_argument(
+        "--freshness-gate",
+        choices=FRESHNESS_GATES,
+        default="none",
+    )
+    parser.add_argument(
+        "--freshness-response",
+        choices=FRESHNESS_RESPONSES,
+        default="observe",
     )
     parser.add_argument("--fault-layer", type=int)
     parser.add_argument("--fault-policy-step", type=int)
@@ -236,6 +252,17 @@ def _validate_inputs(args: Arguments) -> None:
     has_fault = fault_spec is not None or args.fault_manifest is not None
     has_stale_image = args.stale_image_manifest is not None
     has_intervention = has_fault or has_stale_image
+    if args.freshness_response == "hold" and args.freshness_gate == "none":
+        raise ValueError("freshness hold requires an enabled freshness gate")
+    if args.freshness_response == "hold" and not has_stale_image:
+        raise ValueError(
+            "freshness hold requires a stale-image manifest to declare its response step"
+        )
+    if args.freshness_response == "hold" and args.evidence_dir is not None:
+        raise ValueError(
+            "freshness hold cannot be combined with evidence tracing because the "
+            "graph would record the proposed policy action rather than the held action"
+        )
     if args.replay_clean_prefix and not has_intervention:
         raise ValueError("--replay-clean-prefix requires an intervention")
     if has_intervention and not args.paired_clean_dirs:
@@ -327,6 +354,7 @@ def _evidence_code_hashes(project_root: Path) -> dict[str, str | None]:
         project_root / "embodied_silent_failures" / name
         for name in (
             "faults.py",
+            "freshness.py",
             "openvla_rollout.py",
             "openvla_runtime.py",
             "provenance.py",
@@ -668,6 +696,8 @@ def main() -> None:
         wait_steps=args.wait_steps,
         save_video=args.save_video,
         image_input_mode=args.image_input_mode,
+        freshness_gate=args.freshness_gate,
+        freshness_response=args.freshness_response,
     )
     runtime.set_seed_everywhere(args.seed)
     model = runtime.get_model(policy_config)

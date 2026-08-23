@@ -16,6 +16,11 @@ from embodied_silent_failures.artifacts import (
 )
 from embodied_silent_failures.evidence_graph.rollout import RolloutEvidence
 from embodied_silent_failures.faults import TransientActivationFault
+from embodied_silent_failures.freshness import (
+    hold_action,
+    observe_freshness,
+    summarize_freshness,
+)
 from embodied_silent_failures.openvla_runtime import Runtime
 from embodied_silent_failures.plan import Trial
 from embodied_silent_failures.replay import (
@@ -43,6 +48,8 @@ class RolloutConfig:
     wait_steps: int
     save_video: bool
     image_input_mode: str
+    freshness_gate: str = "none"
+    freshness_response: str = "observe"
 
 
 class CounterfactualReplayInvalid(RuntimeError):
@@ -165,6 +172,8 @@ def run_trial(
     observation_history: list[dict[str, Any]] = []
     policy_images = []
     replay_images = []
+    previous_policy_image = None
+    previous_executed_action = None
     rows: list[dict[str, Any]] = []
     inference_seconds: list[float] = []
     simulator_seconds: list[float] = []
@@ -197,6 +206,15 @@ def run_trial(
             and policy_step < intervention_step
         ):
             image = runtime.get_libero_image(observation, resize_size)
+            freshness = None
+            if config.freshness_gate != "none":
+                freshness = observe_freshness(
+                    runtime.np,
+                    policy_step=policy_step,
+                    policy_image=image,
+                    previous_policy_image=previous_policy_image,
+                    image_source_policy_step=policy_step,
+                )
             policy_images.append(image.copy())
             if config.save_video:
                 replay_images.append(image)
@@ -240,6 +258,22 @@ def run_trial(
             row["timing/simulator_seconds"] = simulator_seconds[-1]
             row["environment/reward"] = reward
             row["environment/done"] = bool(done)
+            if freshness is not None:
+                row.update(
+                    {
+                        "proposed_action/dx": action[0],
+                        "proposed_action/dy": action[1],
+                        "proposed_action/dz": action[2],
+                        "proposed_action/droll": action[3],
+                        "proposed_action/dpitch": action[4],
+                        "proposed_action/dyaw": action[5],
+                        "proposed_action/dgripper": action[6],
+                        **freshness.to_row(
+                            config.freshness_gate,
+                            response_applied=False,
+                        ),
+                    }
+                )
             rows.append(row)
             if evidence is not None:
                 evidence.finish_step(
@@ -249,6 +283,8 @@ def run_trial(
                     done=bool(done),
                 )
             replayed_steps += 1
+            previous_policy_image = image.copy()
+            previous_executed_action = runtime.np.asarray(action).copy()
             if done:
                 raise CounterfactualReplayTerminated(policy_step, intervention_step)
             continue
@@ -297,6 +333,33 @@ def run_trial(
                 intervention,
             )
 
+        freshness = None
+        response_applied = False
+        if config.freshness_gate != "none":
+            freshness = observe_freshness(
+                runtime.np,
+                policy_step=policy_step,
+                policy_image=policy_image,
+                previous_policy_image=previous_policy_image,
+                image_source_policy_step=source_step,
+            )
+            at_declared_intervention = bool(
+                stale_image_spec is not None
+                and policy_step == stale_image_spec.policy_step
+            )
+            response_applied = bool(
+                config.freshness_response == "hold"
+                and at_declared_intervention
+                and freshness.selected_alarm(config.freshness_gate)
+            )
+            if at_declared_intervention and image_intervention_record is not None:
+                image_intervention_record["freshness_at_intervention"] = (
+                    freshness.intervention_record(
+                        config.freshness_gate,
+                        response_applied=response_applied,
+                    )
+                )
+
         runtime.torch.cuda.synchronize()
         inference_started = time.perf_counter()
         fault_context = (
@@ -342,6 +405,11 @@ def run_trial(
         else:
             action = runtime.normalize_gripper_action(raw_action.copy(), binarize=True)
             action = runtime.invert_gripper_action(action)
+        proposed_action = runtime.np.asarray(action).copy()
+        if response_applied:
+            if previous_executed_action is None:
+                raise RuntimeError("freshness hold has no previous executed action")
+            action = hold_action(runtime.np, previous_executed_action)
 
         hidden_history.append(_extract_hidden_states(runtime, generated))
         observation_history.append(_numeric_observation(runtime, observation))
@@ -371,6 +439,22 @@ def run_trial(
             "robot/eef_z": observation["robot0_eef_pos"][2],
             "timing/inference_seconds": inference_seconds[-1],
         }
+        if freshness is not None:
+            row.update(
+                {
+                    "proposed_action/dx": proposed_action[0],
+                    "proposed_action/dy": proposed_action[1],
+                    "proposed_action/dz": proposed_action[2],
+                    "proposed_action/droll": proposed_action[3],
+                    "proposed_action/dpitch": proposed_action[4],
+                    "proposed_action/dyaw": proposed_action[5],
+                    "proposed_action/dgripper": proposed_action[6],
+                    **freshness.to_row(
+                        config.freshness_gate,
+                        response_applied=response_applied,
+                    ),
+                }
+            )
         row.update({f"action/{key}": value for key, value in metrics.items()})
         if fault_injector is not None:
             record = fault_injector.record
@@ -394,6 +478,8 @@ def run_trial(
         row["environment/reward"] = reward
         row["environment/done"] = bool(done)
         rows.append({key: _python_value(runtime, value) for key, value in row.items()})
+        previous_policy_image = policy_image.copy()
+        previous_executed_action = runtime.np.asarray(action).copy()
         if evidence is not None:
             evidence.finish_step(
                 policy_step,
@@ -416,6 +502,13 @@ def run_trial(
         fault_record = image_intervention_record
     condition = run_condition if fault_record else "clean"
     evidence_result = None
+    freshness_result = None
+    if config.freshness_gate != "none":
+        freshness_result = summarize_freshness(
+            rows,
+            gate=config.freshness_gate,
+            response=config.freshness_response,
+        )
 
     stem = safe_stem(trial, success)
     csv_path = config.output_dir / f"{stem}.csv"
@@ -447,6 +540,7 @@ def run_trial(
             "episode_success": success,
             "trial_seed": trial_seed,
             "initial_state_sha256": initial_state_sha256,
+            "freshness": freshness_result,
             "mp4_path": str(video_path) if config.save_video else None,
         },
     )
@@ -495,6 +589,7 @@ def run_trial(
             else {"enabled": False}
         ),
         "evidence_graph": evidence_result,
+        "freshness": freshness_result,
         "files": {
             "csv": csv_path.name,
             "pickle": pickle_path.name,
