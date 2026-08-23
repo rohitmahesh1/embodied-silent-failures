@@ -112,6 +112,34 @@ class AnalyzeFreshnessTests(unittest.TestCase):
                 0,
             )
 
+    def test_finds_task_shards_below_each_campaign_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stale = root / "stale"
+            current = root / "current"
+            (stale / "task0").mkdir(parents=True)
+            (current / "task0").mkdir(parents=True)
+            self._write_trial(
+                stale / "task0",
+                episode=0,
+                condition="stale_image",
+                success=True,
+                alarm=True,
+                response=True,
+            )
+            self._write_trial(
+                current / "task0",
+                episode=0,
+                condition="current_image_control",
+                success=True,
+                alarm=False,
+                response=False,
+            )
+
+            result = analyze(stale, current)
+
+            self.assertEqual(result["paired_trials"], 1)
+
     def test_exact_two_sided_binomial_matches_mcnemar_small_case(self) -> None:
         self.assertEqual(_exact_binomial_two_sided(3, 0), 0.25)
         self.assertIsNone(_exact_binomial_two_sided(0, 0))

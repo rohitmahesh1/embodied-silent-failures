@@ -28,14 +28,14 @@ def _load_results(
     directory: Path, condition: str
 ) -> dict[tuple[int, int], dict[str, Any]]:
     results: dict[tuple[int, int], dict[str, Any]] = {}
-    for path in sorted(directory.glob("*.complete.json")):
+    for path in sorted(directory.rglob("*.complete.json")):
         value = json.loads(path.read_text(encoding="utf-8"))
         if value.get("status") != "complete" or value.get("condition") != condition:
             raise ValueError(f"unexpected completion marker in {path}")
         trial = _trial(value)
         if trial in results:
             raise ValueError(f"duplicate completion marker for trial {trial}")
-        results[trial] = {**value, "_directory": directory}
+        results[trial] = {**value, "_directory": path.parent}
     if not results:
         raise ValueError(f"no {condition} completion markers in {directory}")
     return results
