@@ -26,6 +26,7 @@ def published_configuration(epochs: int = 1000) -> dict[str, Any]:
     return {
         "dataset": {
             "name": "pizero",
+            "data_path_unseen": None,
             "load_to_cuda": False,
             "normalize_hidden_states": False,
             "unseen_task_ratio": 0.3,

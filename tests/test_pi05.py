@@ -166,6 +166,7 @@ class Pi05ContractTests(unittest.TestCase):
 
         self.assertEqual(config["dataset"]["horizon_idx_rel"], 0.0)
         self.assertEqual(config["dataset"]["diff_idx_rel"], 1.0)
+        self.assertIsNone(config["dataset"]["data_path_unseen"])
         self.assertEqual(config["model"]["name"], "indep")
         self.assertEqual(config["model"]["n_layers"], 2)
         self.assertEqual(config["model"]["hidden_dim"], 256)
