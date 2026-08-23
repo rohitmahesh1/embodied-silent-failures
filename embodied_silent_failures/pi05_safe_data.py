@@ -199,6 +199,10 @@ def export_features(
             "replan_steps": expected_replan_steps,
             "source_digests_verified": verify_source_digests,
         },
+        "extractor": {
+            "file": str(Path(__file__).resolve()),
+            "sha256": file_sha256(Path(__file__)),
+        },
         "rollouts": len(features),
         "decisions": offsets[-1],
         "successes": sum(successes),
