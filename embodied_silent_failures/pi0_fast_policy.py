@@ -22,6 +22,14 @@ from embodied_silent_failures.pi0_fast_contract import (
 REQUEST_KEY = "evidence_request"
 
 
+def evidence_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        **(metadata or {}),
+        "evidence_protocol_version": PROTOCOL_VERSION,
+        "evidence_names": ["encoded", "pre_logits", "action_token_logits"],
+    }
+
+
 def reference_sample_action_tokens(
     self: Any,
     rng: Any,
@@ -167,7 +175,7 @@ def create_evidence_policy(
     model: Any,
     input_transforms: list[Any],
     output_transforms: list[Any],
-    metadata: dict[str, Any],
+    metadata: dict[str, Any] | None,
 ) -> Any:
     """Serve SAFE's pinned pi0-FAST features through an audited response."""
     import jax
@@ -201,11 +209,7 @@ def create_evidence_policy(
             # these exact model input and output transforms around the checkpoint.
             self._input_transform = transform_module.compose(input_transforms)
             self._output_transform = transform_module.compose(output_transforms)
-            self._metadata = {
-                **metadata,
-                "evidence_protocol_version": PROTOCOL_VERSION,
-                "evidence_names": ["encoded", "pre_logits", "action_token_logits"],
-            }
+            self._metadata = evidence_metadata(metadata)
 
         def _decode(self, state: Any, tokens: Any) -> Any:
             return self._output_transform(

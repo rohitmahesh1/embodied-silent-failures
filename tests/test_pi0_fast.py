@@ -23,7 +23,11 @@ from embodied_silent_failures.pi0_fast_contract import (
     PROTOCOL_VERSION,
     validate_replan_steps,
 )
-from embodied_silent_failures.pi0_fast_policy import REQUEST_KEY, parity_record
+from embodied_silent_failures.pi0_fast_policy import (
+    REQUEST_KEY,
+    evidence_metadata,
+    parity_record,
+)
 from embodied_silent_failures.pi0_fast_rollout import (
     EXACT_PARITY_EXIT_CODE,
     ExactParityError,
@@ -113,6 +117,19 @@ class FakeEnvironment:
 
 
 class Pi0FastTests(unittest.TestCase):
+    def test_public_config_can_omit_policy_metadata(self):
+        self.assertEqual(
+            evidence_metadata(None),
+            {
+                "evidence_protocol_version": PROTOCOL_VERSION,
+                "evidence_names": [
+                    "encoded",
+                    "pre_logits",
+                    "action_token_logits",
+                ],
+            },
+        )
+
     def test_client_files_parse_as_python_38(self):
         project_root = Path(__file__).resolve().parents[1]
         for name in (
