@@ -68,8 +68,13 @@ def _record_server_session(output_dir: Path, record: dict[str, Any]) -> None:
 class PolicyServer:
     """Own one restartable policy process and its immutable session records."""
 
-    def __init__(self, args: argparse.Namespace):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        module: str = "embodied_silent_failures.serve_pi05",
+    ):
         self.args = args
+        self.module = module
         self.process: subprocess.Popen[Any] | None = None
         self.metadata_path: Path | None = None
         self.log_file: Any | None = None
@@ -107,7 +112,7 @@ class PolicyServer:
                 str(self.args.policy_python),
                 "-u",
                 "-m",
-                "embodied_silent_failures.serve_pi05",
+                self.module,
                 "--openpi-root",
                 str(self.args.openpi_root),
                 "--checkpoint",

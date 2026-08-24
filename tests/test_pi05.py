@@ -13,6 +13,7 @@ except ImportError:
     np = None
 
 from embodied_silent_failures.artifacts import prepare_trial
+from embodied_silent_failures.campaign_runner import running_status
 from embodied_silent_failures.pi05_contract import (
     ACTION_DIMENSION,
     ACTION_HORIZON,
@@ -29,7 +30,6 @@ from embodied_silent_failures.pi05_rollout import (
     run_trial,
     validate_policy_response,
 )
-from embodied_silent_failures.run_pi05 import running_status
 from embodied_silent_failures.plan import Trial
 from embodied_silent_failures.pi05_supervisor import (
     InfrastructureError,
