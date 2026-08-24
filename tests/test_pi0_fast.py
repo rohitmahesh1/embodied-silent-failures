@@ -335,33 +335,32 @@ class Pi0FastTests(unittest.TestCase):
             }
             return element, image, image
 
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            mock.patch(
+        with tempfile.TemporaryDirectory() as directory:
+            environment_patch = mock.patch(
                 "embodied_silent_failures.pi0_fast_rollout._get_libero_env",
                 return_value=(environment, "move the object"),
-            ),
-            mock.patch(
+            )
+            input_patch = mock.patch(
                 "embodied_silent_failures.pi0_fast_rollout._policy_input",
                 side_effect=policy_input,
-            ),
-        ):
-            result = run_trial(
-                RolloutConfig(
-                    output_dir=Path(directory),
-                    task_suite="libero_10",
-                    base_seed=7,
-                    wait_steps=0,
-                    replan_steps=5,
-                    save_video=False,
-                    compare_reference_first_decision=True,
-                ),
-                client,
-                trial,
-                SimpleNamespace(),
-                np.asarray([1.0], dtype=np.float32),
-                {"server_metadata_sha256": "server"},
             )
+            with environment_patch, input_patch:
+                result = run_trial(
+                    RolloutConfig(
+                        output_dir=Path(directory),
+                        task_suite="libero_10",
+                        base_seed=7,
+                        wait_steps=0,
+                        replan_steps=5,
+                        save_video=False,
+                        compare_reference_first_decision=True,
+                    ),
+                    client,
+                    trial,
+                    SimpleNamespace(),
+                    np.asarray([1.0], dtype=np.float32),
+                    {"server_metadata_sha256": "server"},
+                )
 
         self.assertTrue(environment.closed)
         self.assertTrue(result["success"])
@@ -393,34 +392,33 @@ class Pi0FastTests(unittest.TestCase):
                 image,
             )
 
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            mock.patch(
+        with tempfile.TemporaryDirectory() as directory:
+            environment_patch = mock.patch(
                 "embodied_silent_failures.pi0_fast_rollout._get_libero_env",
                 return_value=(environment, "move the object"),
-            ),
-            mock.patch(
+            )
+            input_patch = mock.patch(
                 "embodied_silent_failures.pi0_fast_rollout._policy_input",
                 side_effect=policy_input,
-            ),
-            self.assertRaises(DecodeAuditComplete) as raised,
-        ):
-            run_trial(
-                RolloutConfig(
-                    output_dir=Path(directory),
-                    task_suite="libero_10",
-                    base_seed=7,
-                    wait_steps=0,
-                    replan_steps=5,
-                    save_video=False,
-                    audit_malformed_decodes=True,
-                ),
-                client,
-                trial,
-                SimpleNamespace(),
-                np.asarray([1.0], dtype=np.float32),
-                {"server_metadata_sha256": "server"},
             )
+            with environment_patch, input_patch:
+                with self.assertRaises(DecodeAuditComplete) as raised:
+                    run_trial(
+                        RolloutConfig(
+                            output_dir=Path(directory),
+                            task_suite="libero_10",
+                            base_seed=7,
+                            wait_steps=0,
+                            replan_steps=5,
+                            save_video=False,
+                            audit_malformed_decodes=True,
+                        ),
+                        client,
+                        trial,
+                        SimpleNamespace(),
+                        np.asarray([1.0], dtype=np.float32),
+                        {"server_metadata_sha256": "server"},
+                    )
 
         self.assertTrue(environment.closed)
         self.assertEqual(environment.steps, 5)
