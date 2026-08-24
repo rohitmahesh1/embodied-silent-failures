@@ -287,7 +287,11 @@ def main() -> None:
         args,
         plan,
         _prepare_run,
-        PolicyServer(args, "embodied_silent_failures.serve_pi0_fast"),
+        PolicyServer(
+            args,
+            "embodied_silent_failures.serve_pi0_fast",
+            health_mode="tcp",
+        ),
         _trial_command,
     )
 

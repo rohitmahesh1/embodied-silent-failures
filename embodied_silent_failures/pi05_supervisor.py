@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 import urllib.error
@@ -47,6 +48,14 @@ def _health(host: str, port: int) -> bool:
         return False
 
 
+def _tcp_health(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
 def stop_process(process: subprocess.Popen[Any] | None) -> None:
     if process is None or process.poll() is not None:
         return
@@ -72,9 +81,13 @@ class PolicyServer:
         self,
         args: argparse.Namespace,
         module: str = "embodied_silent_failures.serve_pi05",
+        health_mode: str = "http",
     ):
+        if health_mode not in {"http", "tcp"}:
+            raise ValueError(f"unsupported policy server health mode: {health_mode}")
         self.args = args
         self.module = module
+        self.health_mode = health_mode
         self.process: subprocess.Popen[Any] | None = None
         self.metadata_path: Path | None = None
         self.log_file: Any | None = None
@@ -92,8 +105,12 @@ class PolicyServer:
             and self.process.poll() is None
             and self.metadata_path is not None
             and self.metadata_path.is_file()
-            and _health(self.args.host, self.args.port)
+            and self._healthy()
         )
+
+    def _healthy(self) -> bool:
+        check = _health if self.health_mode == "http" else _tcp_health
+        return check(self.args.host, self.args.port)
 
     def ensure(self) -> Path:
         if self.ready():
@@ -141,7 +158,7 @@ class PolicyServer:
                         f"see {log_path}"
                     )
                     break
-                if metadata_path.is_file() and _health(self.args.host, self.args.port):
+                if metadata_path.is_file() and self._healthy():
                     record = {
                         "session_id": session_id,
                         "started_at": started_at,

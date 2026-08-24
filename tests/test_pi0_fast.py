@@ -11,7 +11,7 @@ except ImportError:
     np = None
 
 from embodied_silent_failures.campaign_runner import trial_process_error
-from embodied_silent_failures.pi05_supervisor import InfrastructureError
+from embodied_silent_failures.pi05_supervisor import InfrastructureError, PolicyServer
 from embodied_silent_failures.pi0_fast_contract import (
     ACTION_DIMENSION,
     ACTION_HORIZON,
@@ -177,6 +177,10 @@ class Pi0FastTests(unittest.TestCase):
         self.assertIsInstance(
             trial_process_error(1, (), Path("trial.log")), RuntimeError
         )
+
+    def test_policy_server_rejects_an_ambiguous_health_probe(self):
+        with self.assertRaisesRegex(ValueError, "health mode"):
+            PolicyServer(SimpleNamespace(), health_mode="guess")
 
     def test_replan_range_matches_action_horizon(self):
         self.assertEqual(validate_replan_steps(ACTION_HORIZON), ACTION_HORIZON)
