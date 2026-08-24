@@ -1,4 +1,5 @@
 import ast
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,7 @@ from embodied_silent_failures.pi0_fast_policy import (
 )
 from embodied_silent_failures.pi0_fast_rollout import (
     EXACT_PARITY_EXIT_CODE,
+    FALLBACK_CONTINUATION_CONDITION,
     DecodeAuditComplete,
     ExactParityError,
     RolloutConfig,
@@ -45,7 +47,7 @@ from embodied_silent_failures.plan import Trial
 from embodied_silent_failures.run_pi0_fast import _trial_plan
 
 
-def _response(decision_id, compare_reference=False):
+def _response(decision_id, compare_reference=False, decode_status=None):
     decoded_tokens = 3
     response = {
         "actions": np.arange(
@@ -87,6 +89,23 @@ def _response(decision_id, compare_reference=False):
             "maximum_absolute_action_error": 0.0,
             "action_atol": PARITY_ACTION_ATOL,
             "passed": True,
+        }
+    if decode_status is not None:
+        captured_stdout = ""
+        if decode_status == "tokenizer_fallback":
+            captured_stdout = (
+                "Error decoding tokens: cannot reshape array of size 68 "
+                "into shape (7)\n"
+            )
+        response["decode_diagnostic"] = {
+            "schema_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
+            "decision_id": decision_id,
+            "status": decode_status,
+            "captured_stdout": captured_stdout,
+            "action_shape": [ACTION_HORIZON, ACTION_DIMENSION],
+            "actions_sha256": array_sha256(response["actions"]),
+            "policy_visible_actions_all_zero": False,
         }
     return response
 
@@ -138,6 +157,21 @@ class AuditClient(FakeClient):
         if request["decision_id"] == 1:
             return _decode_audit_response(request["decision_id"])
         return _response(request["decision_id"], request["compare_reference"])
+
+
+class FallbackClient(FakeClient):
+    def infer(self, element):
+        request = element[REQUEST_KEY]
+        self.requests.append(request)
+        return _response(
+            request["decision_id"],
+            request["compare_reference"],
+            decode_status=(
+                "tokenizer_fallback"
+                if request["decision_id"] == 1
+                else "decoded"
+            ),
+        )
 
 
 class FakeEnvironment:
@@ -371,6 +405,75 @@ class Pi0FastTests(unittest.TestCase):
         self.assertFalse(client.requests[1]["compare_reference"])
         self.assertFalse(client.requests[0]["audit_malformed_decode"])
         self.assertFalse(client.requests[1]["audit_malformed_decode"])
+        self.assertFalse(client.requests[0]["record_decode_fallback"])
+        self.assertFalse(client.requests[1]["record_decode_fallback"])
+
+    @unittest.skipIf(np is None, "NumPy is installed in the pi0-FAST runtime")
+    def test_fallback_continuation_records_and_executes_the_returned_actions(self):
+        trial = Trial(0, 0)
+        environment = FakeEnvironment()
+        client = FallbackClient()
+
+        def policy_input(observation, task_description):
+            value = int(np.asarray(observation["joint"]).reshape(-1)[0])
+            image = np.full((2, 2, 3), value, dtype=np.uint8)
+            return (
+                {
+                    "observation/image": image,
+                    "observation/wrist_image": image,
+                    "observation/state": np.arange(8, dtype=np.float32),
+                    "prompt": task_description,
+                },
+                image,
+                image,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            environment_patch = mock.patch(
+                "embodied_silent_failures.pi0_fast_rollout._get_libero_env",
+                return_value=(environment, "move the object"),
+            )
+            input_patch = mock.patch(
+                "embodied_silent_failures.pi0_fast_rollout._policy_input",
+                side_effect=policy_input,
+            )
+            with environment_patch, input_patch:
+                result = run_trial(
+                    RolloutConfig(
+                        output_dir=output_dir,
+                        task_suite="libero_10",
+                        base_seed=7,
+                        wait_steps=0,
+                        replan_steps=5,
+                        save_video=False,
+                        record_decode_fallbacks=True,
+                    ),
+                    client,
+                    trial,
+                    SimpleNamespace(),
+                    np.asarray([1.0], dtype=np.float32),
+                    {"server_metadata_sha256": "server"},
+                )
+            with next(output_dir.glob("*.pkl")).open("rb") as file:
+                artifact = pickle.load(file)
+
+        self.assertTrue(environment.closed)
+        self.assertEqual(environment.steps, 6)
+        self.assertEqual(result["condition"], FALLBACK_CONTINUATION_CONDITION)
+        self.assertEqual(result["decode_fallbacks"], 1)
+        self.assertEqual(result["decode_fallback_decision_indices"], [1])
+        self.assertEqual(
+            artifact["decisions"]["decode_diagnostics"][1]["status"],
+            "tokenizer_fallback",
+        )
+        self.assertEqual(artifact["decode_fallback_decision_indices"], [1])
+        self.assertTrue(
+            all(
+                request["record_decode_fallback"]
+                for request in client.requests
+            )
+        )
 
     @unittest.skipIf(np is None, "NumPy is installed in the pi0-FAST runtime")
     def test_decode_audit_stops_before_executing_the_fallback_action(self):

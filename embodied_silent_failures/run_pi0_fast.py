@@ -21,7 +21,10 @@ from embodied_silent_failures.pi0_fast_contract import (
     SAFE_REVISION,
     validate_replan_steps,
 )
-from embodied_silent_failures.pi0_fast_rollout import EXACT_PARITY_EXIT_CODE
+from embodied_silent_failures.pi0_fast_rollout import (
+    EXACT_PARITY_EXIT_CODE,
+    FALLBACK_CONTINUATION_CONDITION,
+)
 from embodied_silent_failures.plan import (
     Trial,
     build_trial_plan,
@@ -72,6 +75,11 @@ def _arguments() -> argparse.Namespace:
         "--save-video", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--record-decode-fallbacks",
+        action="store_true",
+        help="record FAST decoder fallbacks and execute its returned actions",
+    )
     parser.add_argument(
         "--compare-reference-first-decision",
         action=argparse.BooleanOptionalAction,
@@ -150,6 +158,7 @@ def _scientific_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "exact_parent_parity_on_first_decision": (
             args.compare_reference_first_decision
         ),
+        "record_decode_fallbacks": args.record_decode_fallbacks,
         "openpi_root": str(args.openpi_root.resolve()),
         "libero_root": str(args.libero_root.resolve()),
     }
@@ -180,7 +189,11 @@ def _run_metadata(args: argparse.Namespace, plan: list[Trial]) -> dict[str, Any]
     project_root = Path(__file__).resolve().parents[1]
     return {
         "schema_version": 1,
-        "condition": "clean",
+        "condition": (
+            FALLBACK_CONTINUATION_CONDITION
+            if args.record_decode_fallbacks
+            else "clean"
+        ),
         "created_at": _now(),
         "configuration": _scientific_configuration(args),
         "trial_count": len(plan),
@@ -276,6 +289,8 @@ def _trial_command(
     ]
     if compare_reference:
         command.append("--compare-reference-first-decision")
+    if args.record_decode_fallbacks:
+        command.append("--record-decode-fallbacks")
     return command
 
 

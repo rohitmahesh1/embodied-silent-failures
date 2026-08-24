@@ -39,6 +39,7 @@ from embodied_silent_failures.plan import Trial
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 EXACT_PARITY_EXIT_CODE = 86
+FALLBACK_CONTINUATION_CONDITION = "native_decode_fallback_continuation"
 
 
 class ExactParityError(ValueError):
@@ -63,6 +64,7 @@ class RolloutConfig:
     save_video: bool
     compare_reference_first_decision: bool = False
     audit_malformed_decodes: bool = False
+    record_decode_fallbacks: bool = False
 
 
 def array_sha256(value: Any) -> str:
@@ -121,7 +123,11 @@ def stack_observations(history: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def validate_policy_response(
-    response: dict[str, Any], *, decision_index: int, compare_reference: bool
+    response: dict[str, Any],
+    *,
+    decision_index: int,
+    compare_reference: bool,
+    record_decode_fallback: bool = False,
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -211,7 +217,45 @@ def validate_policy_response(
             )
     elif comparison is not None:
         raise ValueError("server returned an unrequested reference comparison")
+    diagnostic = response.get("decode_diagnostic")
+    if record_decode_fallback:
+        if not isinstance(diagnostic, dict):
+            raise ValueError("requested pi0-FAST decode diagnostic is absent")
+        expected_diagnostic = {
+            "schema_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
+            "decision_id": decision_index,
+            "action_shape": [ACTION_HORIZON, ACTION_DIMENSION],
+            "actions_sha256": array_sha256(arrays["actions"]),
+            "policy_visible_actions_all_zero": bool(
+                np.all(arrays["actions"] == 0)
+            ),
+        }
+        for key, expected in expected_diagnostic.items():
+            if diagnostic.get(key) != expected:
+                raise ValueError(
+                    f"pi0-FAST decode diagnostic {key} is "
+                    f"{diagnostic.get(key)!r}, expected {expected!r}"
+                )
+        if diagnostic.get("status") not in {"decoded", "tokenizer_fallback"}:
+            raise ValueError("pi0-FAST decode diagnostic has an invalid status")
+        captured_stdout = diagnostic.get("captured_stdout")
+        if not isinstance(captured_stdout, str):
+            raise ValueError("pi0-FAST decode diagnostic has no captured output")
+        has_fallback_warning = any(
+            line.startswith("Error decoding tokens:")
+            for line in captured_stdout.splitlines()
+        )
+        if has_fallback_warning != (
+            diagnostic["status"] == "tokenizer_fallback"
+        ):
+            raise ValueError(
+                "pi0-FAST decode status disagrees with the pinned decoder warning"
+            )
+    elif diagnostic is not None:
+        raise ValueError("server returned an unrequested decode diagnostic")
     arrays["decoded_tokens"] = decoded_tokens
+    arrays["decode_diagnostic"] = diagnostic
     return arrays
 
 
@@ -351,6 +395,10 @@ def run_trial(
     import numpy as np
 
     validate_replan_steps(config.replan_steps)
+    if config.audit_malformed_decodes and config.record_decode_fallbacks:
+        raise ValueError(
+            "decode attribution and fallback continuation are separate modes"
+        )
     if config.task_suite not in MAX_STEPS:
         raise ValueError(f"unsupported LIBERO suite: {config.task_suite}")
     if config.wait_steps < 0:
@@ -387,6 +435,7 @@ def run_trial(
                     "decision_id": decision_index,
                     "compare_reference": compare_reference,
                     "audit_malformed_decode": config.audit_malformed_decodes,
+                    "record_decode_fallback": config.record_decode_fallbacks,
                 }
                 inference_started = time.monotonic()
                 response = client.infer(element)
@@ -419,6 +468,7 @@ def run_trial(
                     response,
                     decision_index=decision_index,
                     compare_reference=compare_reference,
+                    record_decode_fallback=config.record_decode_fallbacks,
                 )
                 for offset, action in enumerate(
                     arrays["actions"][: config.replan_steps]
@@ -451,6 +501,7 @@ def run_trial(
                         "reference_comparison": response.get(
                             "reference_comparison"
                         ),
+                        "decode_diagnostic": arrays["decode_diagnostic"],
                     }
                 )
                 if heartbeat is not None:
@@ -509,6 +560,17 @@ def run_trial(
         )
     rollout_seconds = time.monotonic() - rollout_started
     artifact_started = time.monotonic()
+    condition = (
+        FALLBACK_CONTINUATION_CONDITION
+        if config.record_decode_fallbacks
+        else "clean"
+    )
+    fallback_decision_indices = [
+        index
+        for index, item in enumerate(decisions)
+        if item["decode_diagnostic"] is not None
+        and item["decode_diagnostic"]["status"] == "tokenizer_fallback"
+    ]
     stem = safe_stem(trial, success)
     csv_path = config.output_dir / f"{stem}.csv"
     pickle_path = config.output_dir / f"{stem}.pkl"
@@ -545,6 +607,9 @@ def run_trial(
         "reference_comparisons": [
             item["reference_comparison"] for item in decisions
         ],
+        "decode_diagnostics": [
+            item["decode_diagnostic"] for item in decisions
+        ],
         "source_dtypes": [item["source_dtypes"] for item in decisions],
     }
     step_arrays = {
@@ -572,7 +637,7 @@ def run_trial(
         {
             "schema_version": 1,
             "model": "pi0-FAST",
-            "condition": "clean",
+            "condition": condition,
             "task_suite_name": config.task_suite,
             "task_id": trial.task_id,
             "task_description": task_description,
@@ -583,6 +648,7 @@ def run_trial(
             "decisions": decision_arrays,
             "environment": step_arrays,
             "execution": execution,
+            "decode_fallback_decision_indices": fallback_decision_indices,
         },
     )
     if config.save_video:
@@ -594,7 +660,7 @@ def run_trial(
     result = {
         "schema_version": 1,
         "status": "complete",
-        "condition": "clean",
+        "condition": condition,
         "model": "pi0-FAST",
         "task_suite_name": config.task_suite,
         "task_id": trial.task_id,
@@ -605,6 +671,8 @@ def run_trial(
         "environment_steps": len(rows),
         "maximum_environment_steps": MAX_STEPS[config.task_suite],
         "model_decisions": len(decisions),
+        "decode_fallbacks": len(fallback_decision_indices),
+        "decode_fallback_decision_indices": fallback_decision_indices,
         "action_horizon": ACTION_HORIZON,
         "replan_steps": config.replan_steps,
         "rollout_seconds": rollout_seconds,

@@ -331,12 +331,19 @@ def create_evidence_policy(
             decision_id = request.get("decision_id")
             compare_reference = request.get("compare_reference", False)
             audit_malformed_decode = request.get("audit_malformed_decode", False)
+            record_decode_fallback = request.get("record_decode_fallback", False)
             if type(decision_id) is not int or decision_id < 0:
                 raise ValueError("decision_id must be a non-negative integer")
             if type(compare_reference) is not bool:
                 raise ValueError("compare_reference must be a boolean")
             if type(audit_malformed_decode) is not bool:
                 raise ValueError("audit_malformed_decode must be a boolean")
+            if type(record_decode_fallback) is not bool:
+                raise ValueError("record_decode_fallback must be a boolean")
+            if audit_malformed_decode and record_decode_fallback:
+                raise ValueError(
+                    "decode attribution and fallback continuation are separate modes"
+                )
 
             inputs = jax.tree.map(lambda value: value, request_obs)
             inputs = self._input_transform(inputs)
@@ -361,7 +368,7 @@ def create_evidence_policy(
             if not 1 <= decode_step <= MAX_DECODING_STEPS:
                 raise ValueError(f"pi0-FAST decoded {decode_step} tokens")
             host_tokens = np.asarray(jax.device_get(tokens[0]), dtype=np.int32)
-            if audit_malformed_decode:
+            if audit_malformed_decode or record_decode_fallback:
                 actions, instrumented_decode = decode_with_diagnostics(
                     self._decode, inputs["state"][0], host_tokens
                 )
@@ -432,7 +439,10 @@ def create_evidence_policy(
                     "policy_timing": {"infer_ms": inference_ms},
                 }
             if actions is None:
-                raise RuntimeError("pi0-FAST decode returned no actions")
+                raise RuntimeError(
+                    "pi0-FAST decode raised instead of returning its documented "
+                    f"fallback: {instrumented_decode}"
+                )
             source_values = {
                 "encoded_bfloat16_bits": auxiliary[
                     "encoded"
@@ -483,6 +493,13 @@ def create_evidence_policy(
                 },
                 "policy_timing": {"infer_ms": inference_ms},
             }
+            if record_decode_fallback:
+                result["decode_diagnostic"] = {
+                    "schema_version": 1,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "decision_id": decision_id,
+                    **instrumented_decode,
+                }
             if compare_reference:
                 reference_tokens = reference(
                     key,
@@ -494,9 +511,14 @@ def create_evidence_policy(
                 host_reference = np.asarray(
                     jax.device_get(reference_tokens[0]), dtype=np.int32
                 )
-                reference_actions = np.asarray(
-                    self._decode(inputs["state"][0], host_reference)
+                reference_actions, reference_decode = decode_with_diagnostics(
+                    self._decode, inputs["state"][0], host_reference
                 )
+                if reference_actions is None:
+                    raise RuntimeError(
+                        "pi0-FAST parent decode raised during parity comparison: "
+                        f"{reference_decode}"
+                    )
                 result["reference_comparison"] = parity_record(
                     host_tokens,
                     decode_step,

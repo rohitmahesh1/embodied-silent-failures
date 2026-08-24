@@ -44,7 +44,9 @@ def _arguments() -> argparse.Namespace:
     parser.set_defaults(save_video=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--compare-reference-first-decision", action="store_true")
-    parser.add_argument("--audit-malformed-decodes", action="store_true")
+    decode_mode = parser.add_mutually_exclusive_group()
+    decode_mode.add_argument("--audit-malformed-decodes", action="store_true")
+    decode_mode.add_argument("--record-decode-fallbacks", action="store_true")
     return parser.parse_args()
 
 
@@ -163,6 +165,7 @@ def main() -> None:
                     args.compare_reference_first_decision
                 ),
                 audit_malformed_decodes=args.audit_malformed_decodes,
+                record_decode_fallbacks=args.record_decode_fallbacks,
             ),
             client,
             trial,
