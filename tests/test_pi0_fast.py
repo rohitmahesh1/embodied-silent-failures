@@ -24,6 +24,7 @@ from embodied_silent_failures.pi0_fast_contract import (
     validate_replan_steps,
 )
 from embodied_silent_failures.pi0_fast_policy import (
+    INSTRUMENTED_STATIC_ARGUMENTS,
     REQUEST_KEY,
     evidence_metadata,
     parity_record,
@@ -128,6 +129,12 @@ class Pi0FastTests(unittest.TestCase):
                     "action_token_logits",
                 ],
             },
+        )
+
+    def test_shape_defining_decode_limit_is_static_under_jit(self):
+        self.assertEqual(
+            INSTRUMENTED_STATIC_ARGUMENTS,
+            ("max_decoding_steps", "temperature", "n_action_samples"),
         )
 
     def test_client_files_parse_as_python_38(self):

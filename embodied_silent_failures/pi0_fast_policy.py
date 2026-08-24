@@ -20,6 +20,11 @@ from embodied_silent_failures.pi0_fast_contract import (
 
 
 REQUEST_KEY = "evidence_request"
+INSTRUMENTED_STATIC_ARGUMENTS = (
+    "max_decoding_steps",
+    "temperature",
+    "n_action_samples",
+)
 
 
 def evidence_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -194,7 +199,7 @@ def create_evidence_policy(
         )
     instrumented = nnx_utils.module_jit(
         model.sample_actions,
-        static_argnames=("temperature", "n_action_samples"),
+        static_argnames=INSTRUMENTED_STATIC_ARGUMENTS,
     )
     reference_method = types.MethodType(reference_sample_action_tokens, model)
     reference = nnx_utils.module_jit(
