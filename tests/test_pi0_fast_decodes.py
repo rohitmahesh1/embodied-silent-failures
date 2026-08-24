@@ -24,7 +24,32 @@ class Pi0FastDecodeAnalysisTests(unittest.TestCase):
         self.assertEqual(result["family"], "fast_dct_shape")
         self.assertEqual(
             result["reshape_signatures"],
-            [{"coefficient_count": 68, "action_dimension": 7}],
+            [
+                {
+                    "failure_mode": "nondivisible_coefficient_count",
+                    "coefficient_count": 68,
+                    "action_dimension": 7,
+                    "observed_horizon": None,
+                    "expected_horizon": 10,
+                }
+            ],
+        )
+
+    def test_wrong_horizon_is_the_same_malformed_decode_family(self):
+        result = parse_attempt_log(
+            "AssertionError: Decoded DCT coefficients have shape (11, 7), "
+            "expected (10, 7)"
+        )
+        self.assertEqual(result["family"], "fast_dct_shape")
+        self.assertEqual(
+            result["reshape_signatures"][0],
+            {
+                "failure_mode": "wrong_horizon",
+                "coefficient_count": 77,
+                "action_dimension": 7,
+                "observed_horizon": 11,
+                "expected_horizon": 10,
+            },
         )
 
     def test_campaign_accounting_and_selection_are_mechanical(self):

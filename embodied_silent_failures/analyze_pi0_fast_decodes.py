@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
-from embodied_silent_failures.pi0_fast_contract import ACTION_DIMENSION
+from embodied_silent_failures.pi0_fast_contract import ACTION_DIMENSION, ACTION_HORIZON
 from embodied_silent_failures.provenance import file_sha256, load_json
 
 
@@ -15,22 +15,50 @@ RESHAPE_ERROR = re.compile(
     r"cannot reshape array of size (?P<coefficients>\d+) into shape "
     r"\((?P<action_dimension>\d+)\)"
 )
+HORIZON_ERROR = re.compile(
+    r"Decoded DCT coefficients have shape \((?P<horizon>\d+), "
+    r"(?P<action_dimension>\d+)\), expected \((?P<expected_horizon>\d+), "
+    r"(?P<expected_dimension>\d+)\)"
+)
 
 
 def parse_attempt_log(text: str) -> dict[str, Any]:
-    matches = {
-        (int(match.group("coefficients")), int(match.group("action_dimension")))
+    signatures = {
+        (
+            "nondivisible_coefficient_count",
+            int(match.group("coefficients")),
+            int(match.group("action_dimension")),
+            None,
+            ACTION_HORIZON,
+        )
         for match in RESHAPE_ERROR.finditer(text)
     }
-    if not matches:
+    signatures.update(
+        (
+            "wrong_horizon",
+            int(match.group("horizon")) * int(match.group("action_dimension")),
+            int(match.group("action_dimension")),
+            int(match.group("horizon")),
+            int(match.group("expected_horizon")),
+        )
+        for match in HORIZON_ERROR.finditer(text)
+        if match.group("action_dimension") == match.group("expected_dimension")
+    )
+    if not signatures:
         return {"family": "other", "reshape_signatures": []}
-    signatures = [
-        {"coefficient_count": count, "action_dimension": dimension}
-        for count, dimension in sorted(matches)
+    records = [
+        {
+            "failure_mode": mode,
+            "coefficient_count": count,
+            "action_dimension": dimension,
+            "observed_horizon": horizon,
+            "expected_horizon": expected_horizon,
+        }
+        for mode, count, dimension, horizon, expected_horizon in sorted(signatures)
     ]
     return {
-        "family": "fast_dct_shape" if len(matches) == 1 else "ambiguous",
-        "reshape_signatures": signatures,
+        "family": "fast_dct_shape" if len(signatures) == 1 else "ambiguous",
+        "reshape_signatures": records,
     }
 
 
@@ -84,6 +112,7 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
 
     records = []
     attempt_coefficient_counts: collections.Counter[int] = collections.Counter()
+    attempt_failure_modes: collections.Counter[str] = collections.Counter()
     task_counts: collections.Counter[int] = collections.Counter()
     for task_id, episode_index in sorted(unresolved):
         ledger_path = run_dir / "attempts" / f"task{task_id}--ep{episode_index}.json"
@@ -106,6 +135,7 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                     (signature["coefficient_count"], signature["action_dimension"])
                 )
                 attempt_coefficient_counts[signature["coefficient_count"]] += 1
+                attempt_failure_modes[signature["failure_mode"]] += 1
             attempts.append(
                 {
                     "attempt": attempt.get("attempt"),
@@ -143,9 +173,9 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                 "all_attempts_same_shape_failure": reproducible,
                 "attempt_coefficient_counts": coefficient_counts,
                 "attempt_action_dimensions": action_dimensions,
-                "all_attempt_coefficient_counts_are_nondivisible": (
+                "all_attempt_shapes_disagree_with_contract": (
                     all(
-                        count % dimension != 0
+                        count != ACTION_HORIZON * dimension
                         for count, dimension in trial_signatures
                     )
                     if trial_signatures
@@ -202,8 +232,8 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                     for record in records
                 )
             ),
-            "all_shape_failures_have_nondivisible_coefficient_counts": all(
-                record["all_attempt_coefficient_counts_are_nondivisible"] is True
+            "all_attempt_shapes_disagree_with_contract": all(
+                record["all_attempt_shapes_disagree_with_contract"] is True
                 for record in records
             ),
             "same_failure_repeated_on_at_least_two_attempts": sum(
@@ -223,6 +253,9 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                 str(key): value
                 for key, value in sorted(attempt_coefficient_counts.items())
             },
+            "attempt_failure_mode_distribution": dict(
+                sorted(attempt_failure_modes.items())
+            ),
         },
         "audit_selection": {
             "rule": (
