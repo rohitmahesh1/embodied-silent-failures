@@ -78,9 +78,15 @@ class Pi0FastDecodeAnalysisTests(unittest.TestCase):
             attempts = []
             for attempt in (1, 2):
                 relative = f"logs/task0--ep1--attempt{attempt}.log"
+                error = (
+                    "ValueError: cannot reshape array of size 68 into shape (7)\n"
+                    if attempt == 1
+                    else "AssertionError: Decoded DCT coefficients have shape "
+                    "(6, 7), expected (10, 7)\n"
+                )
                 _write(
                     root / relative,
-                    "ValueError: cannot reshape array of size 68 into shape (7)\n",
+                    error,
                 )
                 attempts.append(
                     {"attempt": attempt, "return_code": 1, "log": relative}
@@ -113,13 +119,19 @@ class Pi0FastDecodeAnalysisTests(unittest.TestCase):
             result["summary"]["all_unresolved_are_fast_dct_shape_failures"]
         )
         self.assertEqual(
+            result["summary"][
+                "malformed_family_repeated_but_coefficient_count_changed"
+            ],
+            1,
+        )
+        self.assertEqual(
             result["audit_selection"]["trials"],
             [
                 {
                     "task_id": 0,
                     "episode_index": 1,
-                    "baseline_attempt_coefficient_counts": [68],
-                    "exact_count_repeated": True,
+                    "baseline_attempt_coefficient_counts": [42, 68],
+                    "exact_count_repeated": False,
                 }
             ],
         )

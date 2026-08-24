@@ -155,7 +155,9 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
             and all_attempts_shape_failures
         )
         coefficient_counts = sorted(count for count, _dimension in trial_signatures)
-        action_dimensions = sorted(dimension for _count, dimension in trial_signatures)
+        action_dimensions = sorted(
+            {dimension for _count, dimension in trial_signatures}
+        )
         task_counts[task_id] += 1
 
         heartbeat_path = (
