@@ -14,6 +14,7 @@ from embodied_silent_failures.artifacts import prepare_trial, write_json_atomic
 from embodied_silent_failures.pi0_fast_contract import LIBERO_REVISION
 from embodied_silent_failures.pi0_fast_rollout import (
     EXACT_PARITY_EXIT_CODE,
+    DecodeAuditComplete,
     ExactParityError,
     RolloutConfig,
     array_sha256,
@@ -43,6 +44,7 @@ def _arguments() -> argparse.Namespace:
     parser.set_defaults(save_video=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--compare-reference-first-decision", action="store_true")
+    parser.add_argument("--audit-malformed-decodes", action="store_true")
     return parser.parse_args()
 
 
@@ -76,10 +78,21 @@ def main() -> None:
     args = _arguments()
     trial = Trial(args.task_id, args.episode_index)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    state = prepare_trial(args.output_dir, trial, args.resume)
-    if state == "complete":
-        print(json.dumps({"state": "already_complete", **trial.to_dict()}))
-        return
+    audit_path = (
+        args.output_dir
+        / f"task{trial.task_id}--ep{trial.episode_index}.decode-audit.complete.json"
+    )
+    if args.audit_malformed_decodes:
+        if audit_path.exists():
+            if not args.resume:
+                raise FileExistsError(f"decode audit already exists: {audit_path}")
+            print(json.dumps({"state": "already_complete", **trial.to_dict()}))
+            return
+    else:
+        state = prepare_trial(args.output_dir, trial, args.resume)
+        if state == "complete":
+            print(json.dumps({"state": "already_complete", **trial.to_dict()}))
+            return
 
     if _git_revision(args.libero_root) != LIBERO_REVISION:
         raise RuntimeError(f"LIBERO must be at {LIBERO_REVISION}: {args.libero_root}")
@@ -137,23 +150,50 @@ def main() -> None:
             {**value, "updated_at": datetime.now(timezone.utc).isoformat()},
         )
 
-    result = run_trial(
-        RolloutConfig(
-            output_dir=args.output_dir,
-            task_suite=args.task_suite,
-            base_seed=args.seed,
-            wait_steps=args.wait_steps,
-            replan_steps=args.replan_steps,
-            save_video=args.save_video,
-            compare_reference_first_decision=(args.compare_reference_first_decision),
-        ),
-        client,
-        trial,
-        task,
-        initial_states[trial.episode_index],
-        execution,
-        heartbeat,
-    )
+    try:
+        result = run_trial(
+            RolloutConfig(
+                output_dir=args.output_dir,
+                task_suite=args.task_suite,
+                base_seed=args.seed,
+                wait_steps=args.wait_steps,
+                replan_steps=args.replan_steps,
+                save_video=args.save_video,
+                compare_reference_first_decision=(
+                    args.compare_reference_first_decision
+                ),
+                audit_malformed_decodes=args.audit_malformed_decodes,
+            ),
+            client,
+            trial,
+            task,
+            initial_states[trial.episode_index],
+            execution,
+            heartbeat,
+        )
+    except DecodeAuditComplete as complete:
+        result = {
+            "schema_version": 1,
+            "status": "complete",
+            "condition": "malformed_decode_attribution",
+            "model": "pi0-FAST",
+            "task_suite_name": args.task_suite,
+            **trial.to_dict(),
+            "initial_state_sha256": array_sha256(
+                initial_states[trial.episode_index]
+            ),
+            "replan_steps": args.replan_steps,
+            "execution": execution,
+            "audit": complete.record,
+        }
+        write_json_atomic(audit_path, result)
+        heartbeat(
+            {
+                "state": "complete",
+                **trial.to_dict(),
+                "classification": complete.record["classification"],
+            }
+        )
     print(json.dumps(result, indent=2), flush=True)
 
 

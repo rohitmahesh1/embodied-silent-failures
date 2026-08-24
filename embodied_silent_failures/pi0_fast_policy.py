@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
+import json
 import time
 import types
 from typing import Any
@@ -16,15 +20,110 @@ from embodied_silent_failures.pi0_fast_contract import (
     PALIGEMMA_EOS_TOKEN,
     PARITY_ACTION_ATOL,
     PROTOCOL_VERSION,
+    SAFE_OPENPI_PARENT_REVISION,
 )
 
 
 REQUEST_KEY = "evidence_request"
+FAST_FALLBACK_PREFIX = "Error decoding tokens:"
 INSTRUMENTED_STATIC_ARGUMENTS = (
     "max_decoding_steps",
     "temperature",
     "n_action_samples",
 )
+
+
+def _array_sha256(value: Any) -> str:
+    import numpy as np
+
+    array = np.ascontiguousarray(np.asarray(value))
+    digest = hashlib.sha256()
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(json.dumps(array.shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _exception_chain(error: BaseException) -> list[dict[str, str]]:
+    records = []
+    seen = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        records.append(
+            {
+                "type": f"{type(current).__module__}.{type(current).__qualname__}",
+                "message": str(current),
+            }
+        )
+        current = current.__cause__ or current.__context__
+    return records
+
+
+def decode_with_diagnostics(
+    decode: Any, state: Any, tokens: Any
+) -> tuple[Any | None, dict[str, Any]]:
+    """Run one decode while preserving the pinned FAST fallback signal."""
+    import numpy as np
+
+    output = io.StringIO()
+    try:
+        # physical-intelligence/fast revision ec4d7aa, in
+        # processing_action_tokenizer.py::UniversalActionProcessor.decode, reports
+        # malformed DCT coefficients with print() before substituting normalized
+        # zero actions. Capturing that exact output makes the fallback observable
+        # without changing the pinned dependency or depending on server stdout.
+        with contextlib.redirect_stdout(output):
+            actions = np.asarray(decode(state, tokens))
+    except Exception as error:
+        return None, {
+            "status": "raised",
+            "captured_stdout": output.getvalue(),
+            "exception_chain": _exception_chain(error),
+        }
+
+    captured = output.getvalue()
+    fallback = any(
+        line.startswith(FAST_FALLBACK_PREFIX) for line in captured.splitlines()
+    )
+    return actions, {
+        "status": "tokenizer_fallback" if fallback else "decoded",
+        "captured_stdout": captured,
+        "action_shape": list(actions.shape),
+        "actions_sha256": _array_sha256(actions),
+        "policy_visible_actions_all_zero": bool(np.all(actions == 0)),
+    }
+
+
+def token_record(tokens: Any, decode_step: int) -> dict[str, Any]:
+    import numpy as np
+
+    values = np.asarray(tokens, dtype=np.int32)
+    decoded = values[:decode_step]
+    return {
+        "decode_step": decode_step,
+        "decoded_token_ids": decoded.tolist(),
+        "decoded_tokens_sha256": _array_sha256(decoded),
+        "full_buffer_sha256": _array_sha256(values),
+    }
+
+
+def decode_audit_classification(
+    decoded_tokens_exact: bool,
+    instrumented_status: str,
+    reference_status: str,
+) -> str:
+    if not decoded_tokens_exact:
+        return "sampler_tokens_differ"
+    if instrumented_status == reference_status == "tokenizer_fallback":
+        return "same_tokens_same_tokenizer_fallback"
+    if instrumented_status == "tokenizer_fallback" and reference_status == "decoded":
+        return "instrumented_only_tokenizer_fallback"
+    if instrumented_status == "raised" or reference_status == "raised":
+        return "decode_raised"
+    return "same_tokens_different_decode_status"
 
 
 def evidence_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -231,10 +330,13 @@ def create_evidence_policy(
                 raise ValueError(f"request must include an object at {REQUEST_KEY!r}")
             decision_id = request.get("decision_id")
             compare_reference = request.get("compare_reference", False)
+            audit_malformed_decode = request.get("audit_malformed_decode", False)
             if type(decision_id) is not int or decision_id < 0:
                 raise ValueError("decision_id must be a non-negative integer")
             if type(compare_reference) is not bool:
                 raise ValueError("compare_reference must be a boolean")
+            if type(audit_malformed_decode) is not bool:
+                raise ValueError("audit_malformed_decode must be a boolean")
 
             inputs = jax.tree.map(lambda value: value, request_obs)
             inputs = self._input_transform(inputs)
@@ -259,7 +361,78 @@ def create_evidence_policy(
             if not 1 <= decode_step <= MAX_DECODING_STEPS:
                 raise ValueError(f"pi0-FAST decoded {decode_step} tokens")
             host_tokens = np.asarray(jax.device_get(tokens[0]), dtype=np.int32)
-            actions = np.asarray(self._decode(inputs["state"][0], host_tokens))
+            if audit_malformed_decode:
+                actions, instrumented_decode = decode_with_diagnostics(
+                    self._decode, inputs["state"][0], host_tokens
+                )
+            else:
+                actions = np.asarray(self._decode(inputs["state"][0], host_tokens))
+                instrumented_decode = None
+
+            if (
+                audit_malformed_decode
+                and instrumented_decode is not None
+                and instrumented_decode["status"] != "decoded"
+            ):
+                reference_tokens = reference(
+                    key,
+                    observation,
+                    max_decoding_steps=MAX_DECODING_STEPS,
+                    temperature=0.0,
+                )
+                reference_tokens.block_until_ready()
+                host_reference = np.asarray(
+                    jax.device_get(reference_tokens[0]), dtype=np.int32
+                )
+                eos = np.flatnonzero(host_reference == PALIGEMMA_EOS_TOKEN)
+                reference_decode_step = (
+                    int(eos[0] + 1) if eos.size else len(host_reference)
+                )
+                _reference_actions, reference_decode = decode_with_diagnostics(
+                    self._decode, inputs["state"][0], host_reference
+                )
+                decoded_tokens_exact = bool(
+                    decode_step == reference_decode_step
+                    and np.array_equal(
+                        host_tokens[:decode_step],
+                        host_reference[:reference_decode_step],
+                    )
+                )
+                return {
+                    "decode_audit": {
+                        "schema_version": 1,
+                        "protocol_version": PROTOCOL_VERSION,
+                        "decision_id": decision_id,
+                        "instrumented": {
+                            "tokens": token_record(host_tokens, decode_step),
+                            "decode": instrumented_decode,
+                        },
+                        "reference": {
+                            "source_revision": SAFE_OPENPI_PARENT_REVISION,
+                            "tokens": token_record(
+                                host_reference, reference_decode_step
+                            ),
+                            "decode": reference_decode,
+                        },
+                        "comparison": {
+                            "decoded_length_exact": (
+                                decode_step == reference_decode_step
+                            ),
+                            "decoded_tokens_exact": decoded_tokens_exact,
+                            "full_buffer_exact": bool(
+                                np.array_equal(host_tokens, host_reference)
+                            ),
+                        },
+                        "classification": decode_audit_classification(
+                            decoded_tokens_exact,
+                            instrumented_decode["status"],
+                            reference_decode["status"],
+                        ),
+                    },
+                    "policy_timing": {"infer_ms": inference_ms},
+                }
+            if actions is None:
+                raise RuntimeError("pi0-FAST decode returned no actions")
             source_values = {
                 "encoded_bfloat16_bits": auxiliary[
                     "encoded"

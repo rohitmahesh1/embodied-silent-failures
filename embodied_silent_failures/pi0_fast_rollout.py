@@ -28,6 +28,7 @@ from embodied_silent_failures.pi0_fast_contract import (
     FEATURE_SOURCE_DTYPE,
     FEATURE_TRANSPORT_ENCODING,
     IMAGE_SIZE,
+    MAX_DECODING_STEPS,
     MAX_STEPS,
     PROTOCOL_VERSION,
     validate_replan_steps,
@@ -44,6 +45,14 @@ class ExactParityError(ValueError):
     """Feature collection changed the policy output it was meant to observe."""
 
 
+class DecodeAuditComplete(Exception):
+    """The audit reached a malformed decode or a terminal task outcome."""
+
+    def __init__(self, record: dict[str, Any]):
+        super().__init__(record["classification"])
+        self.record = record
+
+
 @dataclass(frozen=True)
 class RolloutConfig:
     output_dir: Path
@@ -53,6 +62,7 @@ class RolloutConfig:
     replan_steps: int
     save_video: bool
     compare_reference_first_decision: bool = False
+    audit_malformed_decodes: bool = False
 
 
 def array_sha256(value: Any) -> str:
@@ -205,6 +215,53 @@ def validate_policy_response(
     return arrays
 
 
+def validate_decode_audit_response(
+    response: dict[str, Any], *, decision_index: int
+) -> dict[str, Any]:
+    audit = response.get("decode_audit")
+    if not isinstance(audit, dict):
+        raise ValueError("pi0-FAST response contains no decode audit")
+    expected = {
+        "schema_version": 1,
+        "protocol_version": PROTOCOL_VERSION,
+        "decision_id": decision_index,
+    }
+    for key, value in expected.items():
+        if audit.get(key) != value:
+            raise ValueError(
+                f"pi0-FAST decode audit {key} is {audit.get(key)!r}, expected {value!r}"
+            )
+    for name in ("instrumented", "reference"):
+        sampler = audit.get(name)
+        if not isinstance(sampler, dict):
+            raise ValueError(f"pi0-FAST decode audit has no {name} record")
+        tokens = sampler.get("tokens")
+        decode = sampler.get("decode")
+        if not isinstance(tokens, dict) or not isinstance(decode, dict):
+            raise ValueError(f"pi0-FAST decode audit has an incomplete {name} record")
+        token_ids = tokens.get("decoded_token_ids")
+        decode_step = tokens.get("decode_step")
+        if (
+            type(decode_step) is not int
+            or not 1 <= decode_step <= MAX_DECODING_STEPS
+            or not isinstance(token_ids, list)
+            or len(token_ids) != decode_step
+            or any(type(token) is not int for token in token_ids)
+        ):
+            raise ValueError(f"pi0-FAST decode audit has invalid {name} tokens")
+        if decode.get("status") not in {"decoded", "tokenizer_fallback", "raised"}:
+            raise ValueError(f"pi0-FAST decode audit has invalid {name} status")
+    comparison = audit.get("comparison")
+    if not isinstance(comparison, dict) or any(
+        type(comparison.get(key)) is not bool
+        for key in ("decoded_length_exact", "decoded_tokens_exact", "full_buffer_exact")
+    ):
+        raise ValueError("pi0-FAST decode audit has an invalid comparison")
+    if not isinstance(audit.get("classification"), str):
+        raise ValueError("pi0-FAST decode audit has no classification")
+    return audit
+
+
 def bfloat16_bits_to_float32(value: Any) -> Any:
     """Recover float32 values exactly from bfloat16's stored high bits."""
     import numpy as np
@@ -329,10 +386,35 @@ def run_trial(
                 element[REQUEST_KEY] = {
                     "decision_id": decision_index,
                     "compare_reference": compare_reference,
+                    "audit_malformed_decode": config.audit_malformed_decodes,
                 }
                 inference_started = time.monotonic()
                 response = client.infer(element)
                 client_inference_ms = (time.monotonic() - inference_started) * 1000
+                if "decode_audit" in response:
+                    if not config.audit_malformed_decodes:
+                        raise ValueError("server returned an unrequested decode audit")
+                    audit = validate_decode_audit_response(
+                        response, decision_index=decision_index
+                    )
+                    raise DecodeAuditComplete(
+                        {
+                            **audit,
+                            "rollout_context": {
+                                "task_id": trial.task_id,
+                                "episode_index": trial.episode_index,
+                                "environment_step": environment_step,
+                                "decision_index": decision_index,
+                                "main_image_sha256": array_sha256(image),
+                                "wrist_image_sha256": array_sha256(wrist_image),
+                                "state_sha256": array_sha256(
+                                    element["observation/state"]
+                                ),
+                                "client_inference_ms": client_inference_ms,
+                                "server_timing": response.get("server_timing"),
+                            },
+                        }
+                    )
                 arrays = validate_policy_response(
                     response,
                     decision_index=decision_index,
@@ -411,6 +493,20 @@ def run_trial(
 
     if not rows or not decisions:
         raise ValueError("rollout produced no policy-controlled environment steps")
+    if config.audit_malformed_decodes:
+        raise DecodeAuditComplete(
+            {
+                "schema_version": 1,
+                "classification": "no_malformed_decode_observed",
+                "rollout_context": {
+                    "task_id": trial.task_id,
+                    "episode_index": trial.episode_index,
+                    "environment_steps": len(rows),
+                    "model_decisions": len(decisions),
+                    "success": success,
+                },
+            }
+        )
     rollout_seconds = time.monotonic() - rollout_started
     artifact_started = time.monotonic()
     stem = safe_stem(trial, success)

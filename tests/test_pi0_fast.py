@@ -26,15 +26,19 @@ from embodied_silent_failures.pi0_fast_contract import (
 from embodied_silent_failures.pi0_fast_policy import (
     INSTRUMENTED_STATIC_ARGUMENTS,
     REQUEST_KEY,
+    decode_audit_classification,
+    decode_with_diagnostics,
     evidence_metadata,
     parity_record,
 )
 from embodied_silent_failures.pi0_fast_rollout import (
     EXACT_PARITY_EXIT_CODE,
+    DecodeAuditComplete,
     ExactParityError,
     RolloutConfig,
     bfloat16_bits_to_float32,
     run_trial,
+    validate_decode_audit_response,
     validate_policy_response,
 )
 from embodied_silent_failures.plan import Trial
@@ -87,6 +91,36 @@ def _response(decision_id, compare_reference=False):
     return response
 
 
+def _decode_audit_response(decision_id):
+    tokens = {
+        "decode_step": 2,
+        "decoded_token_ids": [21, PALIGEMMA_EOS_TOKEN],
+        "decoded_tokens_sha256": "decoded",
+        "full_buffer_sha256": "full",
+    }
+    return {
+        "decode_audit": {
+            "schema_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
+            "decision_id": decision_id,
+            "instrumented": {
+                "tokens": tokens,
+                "decode": {"status": "tokenizer_fallback"},
+            },
+            "reference": {
+                "tokens": tokens,
+                "decode": {"status": "tokenizer_fallback"},
+            },
+            "comparison": {
+                "decoded_length_exact": True,
+                "decoded_tokens_exact": True,
+                "full_buffer_exact": True,
+            },
+            "classification": "same_tokens_same_tokenizer_fallback",
+        }
+    }
+
+
 class FakeClient:
     def __init__(self):
         self.requests = []
@@ -94,6 +128,15 @@ class FakeClient:
     def infer(self, element):
         request = element[REQUEST_KEY]
         self.requests.append(request)
+        return _response(request["decision_id"], request["compare_reference"])
+
+
+class AuditClient(FakeClient):
+    def infer(self, element):
+        request = element[REQUEST_KEY]
+        self.requests.append(request)
+        if request["decision_id"] == 1:
+            return _decode_audit_response(request["decision_id"])
         return _response(request["decision_id"], request["compare_reference"])
 
 
@@ -224,6 +267,44 @@ class Pi0FastTests(unittest.TestCase):
         )
 
     @unittest.skipIf(np is None, "NumPy is installed in the pi0-FAST runtime")
+    def test_decode_diagnostics_preserve_the_fast_fallback_signal(self):
+        def decode(_state, _tokens):
+            print("Error decoding tokens: cannot reshape array of size 68 into shape (7)")
+            print("Tokens: [1, 2]")
+            return np.ones((10, 7), dtype=np.float32)
+
+        actions, record = decode_with_diagnostics(decode, None, [1, 2])
+        self.assertEqual(record["status"], "tokenizer_fallback")
+        self.assertIn("size 68", record["captured_stdout"])
+        self.assertFalse(record["policy_visible_actions_all_zero"])
+        np.testing.assert_array_equal(actions, np.ones((10, 7)))
+
+    def test_decode_audit_classification_requires_matching_tokens(self):
+        self.assertEqual(
+            decode_audit_classification(
+                True, "tokenizer_fallback", "tokenizer_fallback"
+            ),
+            "same_tokens_same_tokenizer_fallback",
+        )
+        self.assertEqual(
+            decode_audit_classification(
+                False, "tokenizer_fallback", "tokenizer_fallback"
+            ),
+            "sampler_tokens_differ",
+        )
+
+    def test_decode_audit_response_is_bound_to_the_requested_decision(self):
+        response = _decode_audit_response(4)
+        self.assertEqual(
+            validate_decode_audit_response(response, decision_index=4)[
+                "classification"
+            ],
+            "same_tokens_same_tokenizer_fallback",
+        )
+        with self.assertRaisesRegex(ValueError, "decision_id"):
+            validate_decode_audit_response(response, decision_index=5)
+
+    @unittest.skipIf(np is None, "NumPy is installed in the pi0-FAST runtime")
     def test_response_validation_raises_only_the_parity_error_for_failed_gate(self):
         response = _response(2, compare_reference=True)
         arrays = validate_policy_response(
@@ -289,6 +370,67 @@ class Pi0FastTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 2)
         self.assertTrue(client.requests[0]["compare_reference"])
         self.assertFalse(client.requests[1]["compare_reference"])
+        self.assertFalse(client.requests[0]["audit_malformed_decode"])
+        self.assertFalse(client.requests[1]["audit_malformed_decode"])
+
+    @unittest.skipIf(np is None, "NumPy is installed in the pi0-FAST runtime")
+    def test_decode_audit_stops_before_executing_the_fallback_action(self):
+        trial = Trial(0, 0)
+        environment = FakeEnvironment()
+        client = AuditClient()
+
+        def policy_input(observation, task_description):
+            value = int(np.asarray(observation["joint"]).reshape(-1)[0])
+            image = np.full((2, 2, 3), value, dtype=np.uint8)
+            return (
+                {
+                    "observation/image": image,
+                    "observation/wrist_image": image,
+                    "observation/state": np.arange(8, dtype=np.float32),
+                    "prompt": task_description,
+                },
+                image,
+                image,
+            )
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch(
+                "embodied_silent_failures.pi0_fast_rollout._get_libero_env",
+                return_value=(environment, "move the object"),
+            ),
+            mock.patch(
+                "embodied_silent_failures.pi0_fast_rollout._policy_input",
+                side_effect=policy_input,
+            ),
+            self.assertRaises(DecodeAuditComplete) as raised,
+        ):
+            run_trial(
+                RolloutConfig(
+                    output_dir=Path(directory),
+                    task_suite="libero_10",
+                    base_seed=7,
+                    wait_steps=0,
+                    replan_steps=5,
+                    save_video=False,
+                    audit_malformed_decodes=True,
+                ),
+                client,
+                trial,
+                SimpleNamespace(),
+                np.asarray([1.0], dtype=np.float32),
+                {"server_metadata_sha256": "server"},
+            )
+
+        self.assertTrue(environment.closed)
+        self.assertEqual(environment.steps, 5)
+        self.assertEqual(
+            raised.exception.record["rollout_context"]["environment_step"], 5
+        )
+        self.assertEqual(
+            raised.exception.record["classification"],
+            "same_tokens_same_tokenizer_fallback",
+        )
 
 
 if __name__ == "__main__":
