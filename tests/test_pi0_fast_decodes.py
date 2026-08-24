@@ -93,7 +93,8 @@ class Pi0FastDecodeAnalysisTests(unittest.TestCase):
                 {
                     "task_id": 0,
                     "episode_index": 1,
-                    "baseline_coefficient_count": 68,
+                    "baseline_attempt_coefficient_counts": [68],
+                    "exact_count_repeated": True,
                 }
             ],
         )

@@ -83,7 +83,7 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
         )
 
     records = []
-    coefficient_counts: collections.Counter[int] = collections.Counter()
+    attempt_coefficient_counts: collections.Counter[int] = collections.Counter()
     task_counts: collections.Counter[int] = collections.Counter()
     for task_id, episode_index in sorted(unresolved):
         ledger_path = run_dir / "attempts" / f"task{task_id}--ep{episode_index}.json"
@@ -105,6 +105,7 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                 trial_signatures.add(
                     (signature["coefficient_count"], signature["action_dimension"])
                 )
+                attempt_coefficient_counts[signature["coefficient_count"]] += 1
             attempts.append(
                 {
                     "attempt": attempt.get("attempt"),
@@ -115,16 +116,16 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                 }
             )
 
+        all_attempts_shape_failures = all(
+            item["family"] == "fast_dct_shape" for item in attempts
+        )
         reproducible = (
             len(trial_signatures) == 1
             and len(attempts) >= 2
-            and all(item["family"] == "fast_dct_shape" for item in attempts)
+            and all_attempts_shape_failures
         )
-        coefficient_count = None
-        action_dimension = None
-        if len(trial_signatures) == 1:
-            coefficient_count, action_dimension = next(iter(trial_signatures))
-            coefficient_counts[coefficient_count] += 1
+        coefficient_counts = sorted(count for count, _dimension in trial_signatures)
+        action_dimensions = sorted(dimension for _count, dimension in trial_signatures)
         task_counts[task_id] += 1
 
         heartbeat_path = (
@@ -136,12 +137,18 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                 "task_id": task_id,
                 "episode_index": episode_index,
                 "attempt_count": len(attempts),
+                "all_attempts_are_fast_dct_shape_failures": (
+                    all_attempts_shape_failures
+                ),
                 "all_attempts_same_shape_failure": reproducible,
-                "coefficient_count": coefficient_count,
-                "action_dimension": action_dimension,
-                "coefficient_count_divisible_by_action_dimension": (
-                    coefficient_count % action_dimension == 0
-                    if coefficient_count is not None and action_dimension
+                "attempt_coefficient_counts": coefficient_counts,
+                "attempt_action_dimensions": action_dimensions,
+                "all_attempt_coefficient_counts_are_nondivisible": (
+                    all(
+                        count % dimension != 0
+                        for count, dimension in trial_signatures
+                    )
+                    if trial_signatures
                     else None
                 ),
                 "last_successful_decision": (
@@ -157,31 +164,18 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
         )
 
     affected_tasks = sorted(task_counts)
-    reproducible_tasks = sorted(
-        {
-            record["task_id"]
-            for record in records
-            if record["all_attempts_same_shape_failure"]
-        }
-    )
     audit_trials = [
         min(
             (
                 record
                 for record in records
                 if record["task_id"] == task_id
-                and record["all_attempts_same_shape_failure"]
+                and record["all_attempts_are_fast_dct_shape_failures"]
             ),
             key=lambda record: record["episode_index"],
         )
-        for task_id in reproducible_tasks
+        for task_id in affected_tasks
     ]
-    all_shape_failures = all(
-        record["coefficient_count"] is not None for record in records
-    )
-    all_expected_dimension = all(
-        record["action_dimension"] == ACTION_DIMENSION for record in records
-    )
     return {
         "schema_version": 1,
         "source_campaign": {
@@ -199,23 +193,35 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
         },
         "summary": {
             "all_unresolved_are_fast_dct_shape_failures": (
-                all_shape_failures and all_expected_dimension
+                all(
+                    record["all_attempts_are_fast_dct_shape_failures"]
+                    for record in records
+                )
+                and all(
+                    record["attempt_action_dimensions"] == [ACTION_DIMENSION]
+                    for record in records
+                )
             ),
             "all_shape_failures_have_nondivisible_coefficient_counts": all(
-                record["coefficient_count_divisible_by_action_dimension"] is False
+                record["all_attempt_coefficient_counts_are_nondivisible"] is True
                 for record in records
             ),
             "same_failure_repeated_on_at_least_two_attempts": sum(
                 record["all_attempts_same_shape_failure"] for record in records
             ),
+            "malformed_family_repeated_but_coefficient_count_changed": sum(
+                record["all_attempts_are_fast_dct_shape_failures"]
+                and not record["all_attempts_same_shape_failure"]
+                for record in records
+            ),
             "unresolved_fraction_of_plan": len(unresolved) / len(planned),
             "affected_tasks": affected_tasks,
-            "tasks_with_repeated_shape_failures": reproducible_tasks,
             "unresolved_by_task": {
                 str(key): value for key, value in sorted(task_counts.items())
             },
-            "coefficient_count_distribution": {
-                str(key): value for key, value in sorted(coefficient_counts.items())
+            "attempt_coefficient_count_distribution": {
+                str(key): value
+                for key, value in sorted(attempt_coefficient_counts.items())
             },
         },
         "audit_selection": {
@@ -231,7 +237,12 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
                 {
                     "task_id": record["task_id"],
                     "episode_index": record["episode_index"],
-                    "baseline_coefficient_count": record["coefficient_count"],
+                    "baseline_attempt_coefficient_counts": record[
+                        "attempt_coefficient_counts"
+                    ],
+                    "exact_count_repeated": record[
+                        "all_attempts_same_shape_failure"
+                    ],
                 }
                 for record in audit_trials
             ],
