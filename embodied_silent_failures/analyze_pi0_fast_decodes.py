@@ -90,11 +90,16 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
     ):
         raise ValueError("campaign trial plan contains invalid or duplicate identities")
 
-    complete = {
-        (record["task_id"], record["episode_index"])
-        for path in sorted(run_dir.glob("*.complete.json"))
-        for record in [load_json(path)]
-    }
+    complete_records = {}
+    for path in sorted(run_dir.glob("*.complete.json")):
+        record = load_json(path)
+        identity = (record.get("task_id"), record.get("episode_index"))
+        if identity in complete_records:
+            raise ValueError(f"duplicate completion identity: {identity}")
+        if type(record.get("success")) is not bool:
+            raise ValueError(f"completion marker has no boolean success: {path}")
+        complete_records[identity] = record
+    complete = set(complete_records)
     unresolved_paths = sorted(run_dir.glob("*.unresolved.json"))
     unresolved = {
         (record["task_id"], record["episode_index"]): path
@@ -208,6 +213,28 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
         )
         for task_id in affected_tasks
     ]
+    task_outcomes = {}
+    for task_id in sorted({task_id for task_id, _episode_index in planned}):
+        decoded = [
+            record
+            for (record_task, _episode_index), record in complete_records.items()
+            if record_task == task_id
+        ]
+        malformed = task_counts[task_id]
+        successes = sum(record["success"] for record in decoded)
+        task_outcomes[str(task_id)] = {
+            "planned": len(decoded) + malformed,
+            "decoded": len(decoded),
+            "decoded_successes": successes,
+            "malformed": malformed,
+            "success_rate_among_decoded": (
+                successes / len(decoded) if decoded else None
+            ),
+            "malformed_trial_rate": malformed / (len(decoded) + malformed),
+        }
+    decoded_successes = sum(
+        record["success"] for record in complete_records.values()
+    )
     return {
         "schema_version": 1,
         "source_campaign": {
@@ -258,6 +285,18 @@ def analyze_campaign(run_dir: Path) -> dict[str, Any]:
             "attempt_failure_mode_distribution": dict(
                 sorted(attempt_failure_modes.items())
             ),
+        },
+        "censored_outcome_accounting": {
+            "decoded_successes": decoded_successes,
+            "decoded_trials": len(complete),
+            "success_rate_among_decoded": decoded_successes / len(complete),
+            "minimum_success_rate_if_every_malformed_trial_fails": (
+                decoded_successes / len(planned)
+            ),
+            "maximum_success_rate_if_every_malformed_trial_succeeds": (
+                (decoded_successes + len(unresolved)) / len(planned)
+            ),
+            "by_task": task_outcomes,
         },
         "audit_selection": {
             "rule": (

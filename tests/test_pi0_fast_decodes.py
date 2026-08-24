@@ -69,7 +69,7 @@ class Pi0FastDecodeAnalysisTests(unittest.TestCase):
             )
             _write(
                 root / "task0--ep0.complete.json",
-                {"task_id": 0, "episode_index": 0},
+                {"task_id": 0, "episode_index": 0, "success": True},
             )
             _write(
                 root / "task0--ep1.unresolved.json",
@@ -117,6 +117,26 @@ class Pi0FastDecodeAnalysisTests(unittest.TestCase):
         )
         self.assertTrue(
             result["summary"]["all_unresolved_are_fast_dct_shape_failures"]
+        )
+        self.assertEqual(
+            result["censored_outcome_accounting"],
+            {
+                "decoded_successes": 1,
+                "decoded_trials": 1,
+                "success_rate_among_decoded": 1.0,
+                "minimum_success_rate_if_every_malformed_trial_fails": 0.5,
+                "maximum_success_rate_if_every_malformed_trial_succeeds": 1.0,
+                "by_task": {
+                    "0": {
+                        "planned": 2,
+                        "decoded": 1,
+                        "decoded_successes": 1,
+                        "malformed": 1,
+                        "success_rate_among_decoded": 1.0,
+                        "malformed_trial_rate": 0.5,
+                    }
+                },
+            },
         )
         self.assertEqual(
             result["summary"][
