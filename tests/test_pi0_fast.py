@@ -38,6 +38,7 @@ from embodied_silent_failures.pi0_fast_rollout import (
     DecodeAuditComplete,
     ExactParityError,
     RolloutConfig,
+    array_sha256,
     bfloat16_bits_to_float32,
     run_trial,
     validate_decode_audit_response,
