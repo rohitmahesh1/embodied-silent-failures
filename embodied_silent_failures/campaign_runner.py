@@ -116,6 +116,14 @@ def run_campaign(
     def run_attempt(trial: Trial, attempt: int) -> dict[str, Any]:
         nonlocal active_trial
         free_gb = require_storage(args.output_dir, args.minimum_free_gb)
+        write_status(
+            {
+                "trial": trial,
+                "attempt": attempt,
+                "state": "starting_server",
+                "filesystem_reported_free_gb_before_trial": free_gb,
+            }
+        )
         server_metadata = server.ensure()
         heartbeat = (
             args.output_dir
