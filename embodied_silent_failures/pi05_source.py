@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Tuple
 
 from embodied_silent_failures.provenance import load_json
 
 
-SourceRun = tuple[Path, Path, dict[str, Any]]
-CompletionRecord = tuple[Path, Path, dict[str, Any]]
+SourceRun = Tuple[Path, Path, Dict[str, Any]]
+CompletionRecord = Tuple[Path, Path, Dict[str, Any]]
 
 
 def validated_clean_runs(
