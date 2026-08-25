@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 from embodied_silent_failures.pi05_pair import (
+    _image_difference,
     branch_order,
     pair_directory,
     pair_terminal_state,
@@ -13,6 +19,22 @@ from embodied_silent_failures.plan import Trial
 
 
 class Pi05PairTests(unittest.TestCase):
+    @unittest.skipUnless(np is not None, "NumPy is installed in the pi0.5 runtime")
+    def test_image_difference_reports_rounding_scale_pixel_change(self) -> None:
+        expected = np.zeros((2, 3, 3), dtype=np.uint8)
+        actual = expected.copy()
+        actual[1, 2, 0] = 1
+
+        self.assertEqual(
+            _image_difference(np, expected, actual),
+            {
+                "maximum_absolute_channel_error": 1,
+                "mean_absolute_channel_error": 1 / 18,
+                "changed_pixels": 1,
+                "total_pixels": 6,
+            },
+        )
+
     def test_branch_order_balances_without_changing_branch_identity(self) -> None:
         self.assertEqual(
             branch_order("stale_main_camera", 0), ("current", "stale")

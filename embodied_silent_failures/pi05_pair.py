@@ -158,6 +158,42 @@ def _numeric_error(np: Any, expected: dict[str, Any], actual: dict[str, Any]) ->
     return maximum
 
 
+def _image_difference(np: Any, expected: Any, actual: Any) -> dict[str, Any]:
+    left = np.asarray(expected)
+    right = np.asarray(actual)
+    if left.shape != right.shape:
+        return {
+            "left_shape": list(left.shape),
+            "right_shape": list(right.shape),
+        }
+    delta = np.abs(left.astype(np.int16) - right.astype(np.int16))
+    changed_pixels = np.any(delta != 0, axis=-1)
+    return {
+        "maximum_absolute_channel_error": int(delta.max()),
+        "mean_absolute_channel_error": float(delta.mean()),
+        "changed_pixels": int(changed_pixels.sum()),
+        "total_pixels": int(changed_pixels.size),
+    }
+
+
+def _image_divergence(
+    np: Any,
+    *,
+    label: str,
+    camera: str,
+    environment_step: int,
+    expected: Any,
+    actual: Any,
+) -> RuntimeError:
+    detail = json.dumps(
+        _image_difference(np, expected, actual), sort_keys=True, separators=(",", ":")
+    )
+    return RuntimeError(
+        f"branch {label} {camera} camera diverged before intervention at "
+        f"environment step {environment_step}: {detail}"
+    )
+
+
 def _infer(
     np: Any,
     client: Any,
@@ -218,6 +254,8 @@ def _prefix(
         observations = []
         image_hashes = []
         wrist_hashes = []
+        image_frames = []
+        wrist_frames = []
         environment_step = 0
         for decision_index in range(spec.intervention_decision):
             element, image, wrist = _policy_input(observation, task_description)
@@ -238,6 +276,8 @@ def _prefix(
                 observations.append(numeric_observation(observation))
                 image_hashes.append(array_sha256(step_image))
                 wrist_hashes.append(array_sha256(step_wrist))
+                image_frames.append(step_image.copy())
+                wrist_frames.append(step_wrist.copy())
                 actions.append(action.copy())
                 observation, _, done, _ = env.step(action.tolist())
                 environment_step += 1
@@ -256,6 +296,8 @@ def _prefix(
             "observations": observations,
             "image_hashes": image_hashes,
             "wrist_hashes": wrist_hashes,
+            "image_frames": image_frames,
+            "wrist_frames": wrist_frames,
             "target_numeric": numeric_observation(observation),
             "target_image": current_image.copy(),
             "target_wrist": current_wrist.copy(),
@@ -336,9 +378,23 @@ def _run_branch(
                     f"branch {label} replay diverged at environment step {step}: {error}"
                 )
             if array_sha256(image) != prefix["image_hashes"][step]:
-                raise RuntimeError(f"branch {label} main camera diverged before intervention")
+                raise _image_divergence(
+                    np,
+                    label=label,
+                    camera="main",
+                    environment_step=step,
+                    expected=prefix["image_frames"][step],
+                    actual=image,
+                )
             if array_sha256(wrist) != prefix["wrist_hashes"][step]:
-                raise RuntimeError(f"branch {label} wrist camera diverged before intervention")
+                raise _image_divergence(
+                    np,
+                    label=label,
+                    camera="wrist",
+                    environment_step=step,
+                    expected=prefix["wrist_frames"][step],
+                    actual=wrist,
+                )
             observation, reward, done, _ = env.step(action.tolist())
             source_index, chunk_offset = divmod(step, config.replan_steps)
             rows.append(
@@ -369,9 +425,23 @@ def _run_branch(
         if target_error > REPLAY_OBSERVATION_TOLERANCE:
             raise RuntimeError(f"branch {label} target state diverged: {target_error}")
         if not np.array_equal(target_image, prefix["target_image"]):
-            raise RuntimeError(f"branch {label} target main camera diverged")
+            raise _image_divergence(
+                np,
+                label=label,
+                camera="target main",
+                environment_step=len(prefix["actions"]),
+                expected=prefix["target_image"],
+                actual=target_image,
+            )
         if not np.array_equal(target_wrist, prefix["target_wrist"]):
-            raise RuntimeError(f"branch {label} target wrist camera diverged")
+            raise _image_divergence(
+                np,
+                label=label,
+                camera="target wrist",
+                environment_step=len(prefix["actions"]),
+                expected=prefix["target_wrist"],
+                actual=target_wrist,
+            )
 
         decisions = [dict(record) for record in prefix["decisions"]]
         action_plan = collections.deque()
