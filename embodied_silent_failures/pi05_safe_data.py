@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,11 @@ from embodied_silent_failures.artifacts import (
     write_json_atomic,
 )
 from embodied_silent_failures.pi05_contract import DEFAULT_REPLAN_STEPS, SAFE_REVISION
-from embodied_silent_failures.provenance import file_sha256, load_json
+from embodied_silent_failures.pi05_source import (
+    clean_completion_records,
+    validated_clean_runs,
+)
+from embodied_silent_failures.provenance import file_sha256
 
 
 FEATURE_PROTOCOL = "safe-pi0-pre-velocity-first-horizon-final-diffusion-v1"
@@ -39,26 +44,6 @@ def reduce_pre_velocity(pre_velocity: Any, np: Any) -> Any:
     return np.ascontiguousarray(selected, dtype=np.float32)
 
 
-def _completion_records(run_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
-    records = []
-    for path in sorted(run_dir.glob("*.complete.json")):
-        value = load_json(path)
-        if value.get("status") != "complete" or value.get("condition") != "clean":
-            raise ValueError(f"unexpected completion marker: {path}")
-        if value.get("model") != "pi0.5":
-            raise ValueError(f"completion marker is not for pi0.5: {path}")
-        records.append((path, value))
-    if not records:
-        raise ValueError(f"no completed clean pi0.5 rollouts found in {run_dir}")
-    records.sort(key=lambda item: (item[1]["task_id"], item[1]["episode_index"]))
-    identities = [
-        (int(value["task_id"]), int(value["episode_index"])) for _, value in records
-    ]
-    if len(identities) != len(set(identities)):
-        raise ValueError("clean pi0.5 run contains duplicate task/episode identities")
-    return records
-
-
 def _pickle_artifact(
     run_dir: Path, marker: Path, completion: dict[str, Any]
 ) -> tuple[Path, dict[str, Any]]:
@@ -80,7 +65,7 @@ def _pickle_artifact(
 
 
 def export_features(
-    run_dir: Path,
+    run_dirs: Path | Sequence[Path],
     output_dir: Path,
     *,
     expected_replan_steps: int = DEFAULT_REPLAN_STEPS,
@@ -88,17 +73,8 @@ def export_features(
 ) -> dict[str, Any]:
     import numpy as np
 
-    run_dir = run_dir.resolve()
     output_dir = output_dir.resolve()
-    run_path = run_dir / "run.json"
-    run = load_json(run_path)
-    configuration = run.get("configuration", {})
-    if configuration.get("model") != "pi0.5" or run.get("condition") != "clean":
-        raise ValueError("source run is not a clean pi0.5 campaign")
-    if int(configuration.get("replan_steps", -1)) != expected_replan_steps:
-        raise ValueError(
-            "source replan_steps does not match the requested SAFE data contract"
-        )
+    sources = validated_clean_runs(run_dirs, expected_replan_steps)
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"feature output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -109,7 +85,7 @@ def export_features(
     task_ids = []
     episode_indices = []
     successes = []
-    for marker, completion in _completion_records(run_dir):
+    for run_dir, marker, completion in clean_completion_records(sources):
         if int(completion.get("replan_steps", -1)) != expected_replan_steps:
             raise ValueError(f"rollout has a different replan_steps value: {marker}")
         pickle_path, expected_artifact = _pickle_artifact(run_dir, marker, completion)
@@ -149,6 +125,7 @@ def export_features(
                 "episode_index": identity[1],
                 "success": bool(completion["success"]),
                 "decisions": len(selected),
+                "source_run": str(run_dir),
                 "completion": marker.name,
                 "completion_sha256": file_sha256(marker),
                 "pickle": expected_artifact,
@@ -175,6 +152,25 @@ def export_features(
     finally:
         pending.unlink(missing_ok=True)
 
+    source_runs = [
+        {
+            "run_dir": str(run_dir),
+            "run_json_sha256": file_sha256(run_path),
+        }
+        for run_dir, run_path, _run in sources
+    ]
+    reference_run = sources[0][2]
+    source = {
+        "runs": source_runs,
+        "experiment_revision": reference_run.get("repository_states", {})
+        .get("experiment_code", {})
+        .get("revision"),
+        "replan_steps": expected_replan_steps,
+        "source_digests_verified": verify_source_digests,
+    }
+    if len(source_runs) == 1:
+        source.update(source_runs[0])
+
     manifest = {
         "schema_version": 1,
         "feature_protocol": FEATURE_PROTOCOL,
@@ -190,15 +186,7 @@ def export_features(
                 "load_rollouts_from_root"
             ),
         },
-        "source": {
-            "run_dir": str(run_dir),
-            "run_json_sha256": file_sha256(run_path),
-            "experiment_revision": run.get("repository_states", {})
-            .get("experiment_code", {})
-            .get("revision"),
-            "replan_steps": expected_replan_steps,
-            "source_digests_verified": verify_source_digests,
-        },
+        "source": source,
         "extractor": {
             "file": str(Path(__file__).resolve()),
             "sha256": file_sha256(Path(__file__)),
@@ -218,7 +206,13 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Reduce clean pi0.5 rollouts to the feature used by SAFE-MLP."
     )
-    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument(
+        "--run-dir",
+        required=True,
+        action="append",
+        type=Path,
+        help="Clean pi0.5 run directory; repeat for a split campaign.",
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument(
         "--expected-replan-steps", type=int, default=DEFAULT_REPLAN_STEPS

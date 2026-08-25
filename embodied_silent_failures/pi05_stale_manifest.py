@@ -3,17 +3,27 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_json_atomic
-from embodied_silent_failures.pi05_contract import DEFAULT_REPLAN_STEPS
+from embodied_silent_failures.pi05_contract import (
+    DEFAULT_REPLAN_STEPS,
+    validate_replan_steps,
+)
+from embodied_silent_failures.pi05_source import (
+    SourceRun,
+    clean_completion_records,
+    validated_clean_runs,
+)
 from embodied_silent_failures.plan import Trial
 from embodied_silent_failures.provenance import file_sha256, load_json
 
 
-SELECTION_PROTOCOL = "pi05-stale-sites-task-stratified-rollout-uniform-v1"
+SELECTION_PROTOCOL = "pi05-stale-sites-task-stratified-rollout-uniform-v2"
+LEGACY_SELECTION_PROTOCOL = "pi05-stale-sites-task-stratified-rollout-uniform-v1"
 
 
 @dataclass(frozen=True)
@@ -51,20 +61,20 @@ class Pi05StaleSpec:
 @dataclass(frozen=True)
 class Pi05StaleManifest:
     seed: int
-    source_run_json_sha256: str
+    source_run_json_sha256s: tuple[str, ...]
+    replan_steps: int
     specs: dict[Trial, Pi05StaleSpec]
 
 
-def _completed_successes(run_dir: Path) -> dict[int, list[dict[str, Any]]]:
+def _completed_successes(sources: list[SourceRun]) -> dict[int, list[dict[str, Any]]]:
     by_task: dict[int, list[dict[str, Any]]] = {}
-    for path in sorted(run_dir.glob("*.complete.json")):
-        value = load_json(path)
-        if value.get("status") != "complete" or value.get("condition") != "clean":
-            raise ValueError(f"unexpected completion marker: {path}")
-        if value.get("model") != "pi0.5":
-            raise ValueError(f"completion marker is not for pi0.5: {path}")
+    for run_dir, path, value in clean_completion_records(sources):
         if value.get("success") is True and int(value.get("model_decisions", 0)) > 1:
-            value = {**value, "_completion": path.name}
+            value = {
+                **value,
+                "_source_run": run_dir,
+                "_completion": path.name,
+            }
             by_task.setdefault(int(value["task_id"]), []).append(value)
     for values in by_task.values():
         values.sort(key=lambda item: int(item["episode_index"]))
@@ -72,31 +82,30 @@ def _completed_successes(run_dir: Path) -> dict[int, list[dict[str, Any]]]:
 
 
 def build_manifest(
-    run_dir: Path,
+    run_dirs: Path | Sequence[Path],
     output: Path,
     *,
     per_task: int,
     seed: int,
+    expected_replan_steps: int = DEFAULT_REPLAN_STEPS,
 ) -> dict[str, Any]:
     if per_task <= 0 or seed < 0:
-        raise ValueError("per-task count must be positive and seed must be non-negative")
-    run_dir = run_dir.resolve()
-    run_path = run_dir / "run.json"
-    run = load_json(run_path)
-    configuration = run.get("configuration", {})
-    replan_steps = int(configuration.get("replan_steps", -1))
-    if (
-        run.get("condition") != "clean"
-        or configuration.get("model") != "pi0.5"
-        or replan_steps != DEFAULT_REPLAN_STEPS
-    ):
-        raise ValueError("selection requires the native replan_steps=5 pi0.5 baseline")
+        raise ValueError(
+            "per-task count must be positive and seed must be non-negative"
+        )
+    validate_replan_steps(expected_replan_steps)
+    sources = validated_clean_runs(run_dirs, expected_replan_steps)
+    replan_steps = expected_replan_steps
 
-    candidates = _completed_successes(run_dir)
+    candidates = _completed_successes(sources)
     task_ids = sorted(candidates)
     if task_ids != list(range(10)):
         raise ValueError(f"selection population does not contain tasks 0-9: {task_ids}")
-    short = {task: len(values) for task, values in candidates.items() if len(values) < per_task}
+    short = {
+        task: len(values)
+        for task, values in candidates.items()
+        if len(values) < per_task
+    }
     if short:
         raise ValueError(f"tasks have too few successful rollouts: {short}")
 
@@ -110,6 +119,7 @@ def build_manifest(
                     "trial": Trial(task_id, int(completion["episode_index"])),
                     "intervention_decision": rng.randrange(1, decisions),
                     "clean_decisions": decisions,
+                    "source_run": completion["_source_run"],
                     "completion": completion["_completion"],
                 }
             )
@@ -129,9 +139,10 @@ def build_manifest(
         trials.append(
             {
                 **spec.to_dict(),
+                "source_run": str(item["source_run"]),
                 "source_completion": item["completion"],
                 "source_completion_sha256": file_sha256(
-                    run_dir / item["completion"]
+                    item["source_run"] / item["completion"]
                 ),
             }
         )
@@ -159,9 +170,15 @@ def build_manifest(
             },
         },
         "source": {
-            "run_dir": str(run_dir),
-            "run_json_sha256": file_sha256(run_path),
-            "experiment_revision": run.get("repository_states", {})
+            "runs": [
+                {
+                    "run_dir": str(run_dir),
+                    "run_json_sha256": file_sha256(run_path),
+                }
+                for run_dir, run_path, _run in sources
+            ],
+            "experiment_revision": sources[0][2]
+            .get("repository_states", {})
             .get("experiment_code", {})
             .get("revision"),
             "replan_steps": replan_steps,
@@ -176,7 +193,10 @@ def load_manifest(path: Path) -> Pi05StaleManifest:
     value = load_json(path)
     if value.get("schema_version") != 1:
         raise ValueError("unsupported pi0.5 stale manifest schema")
-    if value.get("selection_protocol") != SELECTION_PROTOCOL:
+    if value.get("selection_protocol") not in {
+        SELECTION_PROTOCOL,
+        LEGACY_SELECTION_PROTOCOL,
+    }:
         raise ValueError("unexpected pi0.5 stale selection protocol")
     seed = value.get("seed")
     source = value.get("source")
@@ -185,6 +205,20 @@ def load_manifest(path: Path) -> Pi05StaleManifest:
         raise ValueError("pi0.5 stale manifest has invalid metadata")
     if not isinstance(trials, list) or not trials:
         raise ValueError("pi0.5 stale manifest has no trials")
+
+    source_runs = source.get("runs")
+    if isinstance(source_runs, list):
+        if not all(isinstance(item, dict) for item in source_runs):
+            raise ValueError("pi0.5 stale manifest has invalid source run records")
+        digests = [item.get("run_json_sha256") for item in source_runs]
+    else:
+        digests = [source.get("run_json_sha256")]
+    if not digests or any(
+        not isinstance(digest, str) or len(digest) != 64 for digest in digests
+    ):
+        raise ValueError("pi0.5 stale manifest has invalid source run digests")
+    replan_steps = int(source.get("replan_steps", -1))
+    validate_replan_steps(replan_steps)
 
     specs = {}
     for item in trials:
@@ -203,7 +237,7 @@ def load_manifest(path: Path) -> Pi05StaleManifest:
         if (
             spec.intervention_decision <= 0
             or spec.intervention_decision >= spec.clean_decisions
-            or spec.replan_steps != DEFAULT_REPLAN_STEPS
+            or spec.replan_steps != replan_steps
             or spec.order_bit not in (0, 1)
             or int(item.get("source_decision", -1)) != spec.source_decision
             or int(item.get("intervention_environment_step", -1))
@@ -211,27 +245,42 @@ def load_manifest(path: Path) -> Pi05StaleManifest:
         ):
             raise ValueError(f"invalid pi0.5 stale manifest trial: {trial}")
         specs[trial] = spec
-    digest = source.get("run_json_sha256")
-    if not isinstance(digest, str) or len(digest) != 64:
-        raise ValueError("pi0.5 stale manifest has no source run digest")
-    return Pi05StaleManifest(seed=seed, source_run_json_sha256=digest, specs=specs)
+    return Pi05StaleManifest(
+        seed=seed,
+        source_run_json_sha256s=tuple(digests),
+        replan_steps=replan_steps,
+        specs=specs,
+    )
 
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Predeclare task-stratified stale-camera sites for pi0.5."
     )
-    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument(
+        "--run-dir",
+        required=True,
+        action="append",
+        type=Path,
+        help="Clean pi0.5 run directory; repeat for a split campaign.",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--per-task", type=int, default=5)
     parser.add_argument("--seed", type=int, default=19)
+    parser.add_argument(
+        "--expected-replan-steps", type=int, default=DEFAULT_REPLAN_STEPS
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _arguments()
     result = build_manifest(
-        args.run_dir, args.output, per_task=args.per_task, seed=args.seed
+        args.run_dir,
+        args.output,
+        per_task=args.per_task,
+        seed=args.seed,
+        expected_replan_steps=args.expected_replan_steps,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

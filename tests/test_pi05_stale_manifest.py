@@ -52,6 +52,8 @@ class Pi05StaleManifestTests(unittest.TestCase):
 
         self.assertEqual(left["trials"], right["trials"])
         self.assertEqual(len(loaded.specs), 10)
+        self.assertEqual(loaded.replan_steps, 5)
+        self.assertEqual(len(loaded.source_run_json_sha256s), 1)
         self.assertEqual({trial.task_id for trial in loaded.specs}, set(range(10)))
         self.assertEqual(
             {trial.episode_index for trial in loaded.specs}, {0}
@@ -93,6 +95,63 @@ class Pi05StaleManifestTests(unittest.TestCase):
             manifest = load_manifest(path)
 
         self.assertIn(Trial(4, 0), manifest.specs)
+
+    def test_replan_one_selection_accepts_validated_campaign_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fragments = [root / "first", root / "second"]
+            for fragment in fragments:
+                fragment.mkdir()
+                (fragment / "run.json").write_text(
+                    json.dumps(
+                        {
+                            "condition": "clean",
+                            "configuration": {
+                                "model": "pi0.5",
+                                "replan_steps": 1,
+                            },
+                            "repository_states": {
+                                "experiment_code": {"revision": "revision"}
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            for task_id in range(10):
+                fragment = fragments[task_id % 2]
+                value = {
+                    "status": "complete",
+                    "condition": "clean",
+                    "model": "pi0.5",
+                    "task_id": task_id,
+                    "episode_index": 0,
+                    "success": True,
+                    "model_decisions": 20,
+                }
+                (fragment / f"task{task_id}--ep0.complete.json").write_text(
+                    json.dumps(value), encoding="utf-8"
+                )
+            path = root / "sites.json"
+
+            result = build_manifest(
+                fragments,
+                path,
+                per_task=1,
+                seed=19,
+                expected_replan_steps=1,
+            )
+            loaded = load_manifest(path)
+
+        self.assertEqual(result["source"]["replan_steps"], 1)
+        self.assertEqual(len(result["source"]["runs"]), 2)
+        self.assertEqual(loaded.replan_steps, 1)
+        self.assertEqual(len(loaded.source_run_json_sha256s), 2)
+        self.assertTrue(
+            all(
+                spec.intervention_environment_step == spec.intervention_decision
+                for spec in loaded.specs.values()
+            )
+        )
 
 
 if __name__ == "__main__":

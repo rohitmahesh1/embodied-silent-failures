@@ -53,6 +53,7 @@ def _alarm_summary(
     values: Any,
     band: Any,
     intervention: int,
+    replan_steps: int,
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -62,13 +63,19 @@ def _alarm_summary(
     first = int(crossings[0]) if len(crossings) else None
     windows = {}
     for name, horizon in DECISION_WINDOWS.items():
-        stop = len(values) if horizon is None else min(len(values), intervention + horizon)
+        stop = (
+            len(values)
+            if horizon is None
+            else min(len(values), intervention + horizon)
+        )
         selected = crossings[(crossings >= intervention) & (crossings < stop)]
         windows[name] = {
             "triggered": bool(len(selected)),
             "first_decision": int(selected[0]) if len(selected) else None,
             "first_environment_step_after_intervention": (
-                int((selected[0] - intervention) * 5) if len(selected) else None
+                int((selected[0] - intervention) * replan_steps)
+                if len(selected)
+                else None
             ),
         }
     return {
@@ -121,6 +128,7 @@ def score(
 
     records = []
     score_values = []
+    observed_replan_steps = set()
     completions = sorted(pair_dir.glob("pairs/*/pair.complete.json"))
     if not completions:
         raise ValueError(f"no completed pi0.5 pairs found in {pair_dir}")
@@ -132,6 +140,14 @@ def score(
         if prepare_pair(pair_dir, trial, True) != "complete":
             raise ValueError(f"pi0.5 pair did not validate: {completion_path}")
         intervention = int(completion["intervention_decision"])
+        replan_steps = int(completion.get("replan_steps", -1))
+        if replan_steps <= 0:
+            raise ValueError(f"pi0.5 pair has invalid replan_steps: {completion_path}")
+        if monitor.get("replan_steps") not in (None, replan_steps):
+            raise ValueError(
+                "frozen monitor and pair campaign disagree on replan_steps"
+            )
+        observed_replan_steps.add(replan_steps)
         for label, branch in sorted(completion["branches"].items()):
             pickle_path = completion_path.parent / branch["files"]["pickle"]
             with pickle_path.open("rb") as file:
@@ -153,7 +169,9 @@ def score(
                 )
             if not np.isfinite(values).all():
                 raise ValueError(f"branch SAFE scores are non-finite: {pickle_path}")
-            summary = _alarm_summary(values, primary_band, intervention)
+            summary = _alarm_summary(
+                values, primary_band, intervention, replan_steps
+            )
             records.append(
                 {
                     "task_id": trial.task_id,
@@ -163,6 +181,7 @@ def score(
                     "success": bool(branch["success"]),
                     "decisions": len(values),
                     "intervention_decision": intervention,
+                    "replan_steps": replan_steps,
                     "primary_alpha": float(monitor["primary_alpha"]),
                     "alarm": summary,
                 }
@@ -187,6 +206,9 @@ def score(
             lengths=np.asarray([len(value) for value in score_values], dtype=np.int16),
             scores=padded,
         )
+    if len(observed_replan_steps) != 1:
+        raise ValueError("pi0.5 pair directory mixes replan_steps values")
+    replan_steps = observed_replan_steps.pop()
     result = {
         "schema_version": 1,
         "analysis": "frozen SAFE-MLP scores for paired pi0.5 camera trials",
@@ -202,7 +224,9 @@ def score(
         "decision_windows": {
             name: {
                 "policy_decisions": horizon,
-                "environment_steps": horizon * 5 if horizon is not None else None,
+                "environment_steps": (
+                    horizon * replan_steps if horizon is not None else None
+                ),
             }
             for name, horizon in DECISION_WINDOWS.items()
         },

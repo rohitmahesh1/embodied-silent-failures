@@ -30,6 +30,7 @@ from embodied_silent_failures.pi05_rollout import (
     run_trial,
     validate_policy_response,
 )
+from embodied_silent_failures.score_pi05_safe import _alarm_summary
 from embodied_silent_failures.plan import Trial
 from embodied_silent_failures.pi05_supervisor import (
     InfrastructureError,
@@ -115,6 +116,7 @@ class Pi05ContractTests(unittest.TestCase):
             "pi05_policy.py",
             "pi05_rollout.py",
             "pi05_safe_data.py",
+            "pi05_source.py",
             "pi05_stale_manifest.py",
             "plan.py",
             "provenance.py",
@@ -188,6 +190,22 @@ class Pi05ContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "unexpected band shape"):
             _functional_band_row(np.zeros((2, 6), dtype=np.float32), 6, np)
+
+    @unittest.skipIf(np is None, "NumPy is installed in the pi0.5 runtime")
+    def test_safe_alarm_summary_uses_the_campaign_replan_interval(self):
+        summary = _alarm_summary(
+            np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+            np.asarray([0.5, 0.5, 0.5], dtype=np.float32),
+            intervention=1,
+            replan_steps=1,
+        )
+
+        self.assertEqual(
+            summary["windows"]["within_5_decisions"][
+                "first_environment_step_after_intervention"
+            ],
+            1,
+        )
 
     @unittest.skipIf(np is None, "NumPy is installed in the pi0.5 runtime")
     def test_response_validation_requires_exact_evidence_identity(self):

@@ -48,6 +48,7 @@ class Pi05PairAnalysisTests(unittest.TestCase):
         value = {
             "status": "complete",
             "pair_condition": "stale_main_camera",
+            "replan_steps": 1,
             "task_id": 0,
             "episode_index": episode,
             "branches": {
@@ -92,6 +93,11 @@ class Pi05PairAnalysisTests(unittest.TestCase):
             result = analyze(root, score_path)
 
         stale = result["stale"]
+        self.assertEqual(stale["replan_steps"], 1)
+        self.assertIn(
+            "1 environment step",
+            result["interpretation_boundary"]["stale_fault"],
+        )
         self.assertEqual(stale["outcomes"]["stale_only_failure"], 1)
         self.assertEqual(
             stale["freshness_at_intervention"][

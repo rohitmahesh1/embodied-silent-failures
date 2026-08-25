@@ -81,10 +81,15 @@ def _analyze_stale(
     safe_causal = Counter()
     safe_all_stale = Counter()
     by_task = Counter()
+    replan_steps_values = set()
     records = []
     for key, pair in sorted(pairs.items()):
         if pair.get("pair_condition") != "stale_main_camera":
             raise ValueError(f"stale analysis received another pair condition: {key}")
+        replan_steps = int(pair.get("replan_steps", -1))
+        if replan_steps <= 0:
+            raise ValueError(f"stale pair has invalid replan_steps: {key}")
+        replan_steps_values.add(replan_steps)
         branches = pair["branches"]
         if set(branches) != {"current", "stale"}:
             raise ValueError(f"stale pair has invalid branches: {key}")
@@ -147,8 +152,11 @@ def _analyze_stale(
 
     count = len(pairs)
     causal = outcomes["stale_only_failure"]
+    if len(replan_steps_values) != 1:
+        raise ValueError("stale pair directory mixes replan_steps values")
     return {
         "pairs": count,
+        "replan_steps": replan_steps_values.pop(),
         "outcomes": {
             **dict(sorted(outcomes.items())),
             "exact_mcnemar_two_sided_p": exact_binomial_two_sided(
@@ -202,9 +210,14 @@ def _analyze_null(
     outcome_discordant = 0
     alarm_discordant = 0
     both_success = 0
+    replan_steps_values = set()
     for key, pair in sorted(pairs.items()):
         if pair.get("pair_condition") != "current_current_null":
             raise ValueError(f"null analysis received another pair condition: {key}")
+        replan_steps = int(pair.get("replan_steps", -1))
+        if replan_steps <= 0:
+            raise ValueError(f"null pair has invalid replan_steps: {key}")
+        replan_steps_values.add(replan_steps)
         branches = pair["branches"]
         if set(branches) != {"current_a", "current_b"}:
             raise ValueError(f"null pair has invalid branches: {key}")
@@ -216,8 +229,11 @@ def _analyze_null(
         right_alarm = _safe_detected(scores[(*key, "current_b")])
         alarm_discordant += int(left_alarm != right_alarm)
     count = len(pairs)
+    if len(replan_steps_values) != 1:
+        raise ValueError("null pair directory mixes replan_steps values")
     return {
         "pairs": count,
+        "replan_steps": replan_steps_values.pop(),
         "both_success": both_success,
         "outcome_discordance": _rate(outcome_discordant, count),
         "safe_alarm_discordance": _rate(alarm_discordant, count),
@@ -240,6 +256,10 @@ def analyze(
         raise ValueError("null pair directory and SAFE scores must be supplied together")
     if null_dir is not None and null_scores is not None:
         null = _analyze_null(_pairs(null_dir), _scores(null_scores))
+        if null["replan_steps"] != stale["replan_steps"]:
+            raise ValueError("stale and null campaigns use different replan_steps")
+    environment_steps = stale["replan_steps"]
+    step_label = "step" if environment_steps == 1 else "steps"
     return {
         "schema_version": 1,
         "analysis": "paired pi0.5 stale-main-camera monitor comparison",
@@ -251,8 +271,9 @@ def analyze(
                 "sampled noninitial policy decision"
             ),
             "stale_fault": (
-                "the main policy camera is one policy decision, or five environment "
-                "steps, old; wrist camera and robot state remain current"
+                "the main policy camera is one policy decision, or "
+                f"{environment_steps} environment {step_label}, old; wrist camera "
+                "and robot state remain current"
             ),
             "freshness": (
                 "shadow detection only; source metadata is a retained-metadata "

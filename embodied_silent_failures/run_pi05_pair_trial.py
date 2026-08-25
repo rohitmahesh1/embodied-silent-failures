@@ -70,16 +70,18 @@ def _package_version(name: str):
 def main() -> None:
     args = _arguments()
     trial = Trial(args.task_id, args.episode_index)
+    manifest = load_manifest(args.stale_manifest)
+    if manifest.replan_steps != args.replan_steps:
+        raise ValueError("runner and stale manifest disagree on replan_steps")
+    if trial not in manifest.specs:
+        raise ValueError(f"trial is absent from stale manifest: {trial}")
+    spec = manifest.specs[trial]
     state = prepare_pair(args.output_dir, trial, args.resume)
     if state is not None:
         print(json.dumps({"state": f"already_{state}", **trial.to_dict()}))
         return
     if _git_revision(args.libero_root) != LIBERO_REVISION:
         raise RuntimeError(f"LIBERO must be at {LIBERO_REVISION}: {args.libero_root}")
-    manifest = load_manifest(args.stale_manifest)
-    if trial not in manifest.specs:
-        raise ValueError(f"trial is absent from stale manifest: {trial}")
-    spec = manifest.specs[trial]
 
     sys.path.insert(0, str(args.libero_root))
     sys.path.insert(0, str(args.openpi_root / "packages" / "openpi-client" / "src"))

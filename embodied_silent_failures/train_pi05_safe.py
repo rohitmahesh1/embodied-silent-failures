@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import sys
@@ -20,6 +21,24 @@ from embodied_silent_failures.provenance import (
 
 ALPHAS = (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5)
 PRIMARY_ALPHA = 0.1
+
+
+def _environment_versions() -> dict[str, Any]:
+    packages = (
+        "hydra-core",
+        "natsort",
+        "numpy",
+        "omegaconf",
+        "scikit-learn",
+        "torch",
+        "wandb",
+    )
+    return {
+        "python": sys.version,
+        "packages": {
+            name: importlib.metadata.version(name) for name in packages
+        },
+    }
 
 
 def published_configuration(epochs: int = 1000) -> dict[str, Any]:
@@ -422,6 +441,7 @@ def train(
         "model": "SAFE-MLP",
         "safe_revision": SAFE_REVISION,
         "feature_protocol": FEATURE_PROTOCOL,
+        "replan_steps": int(feature_manifest["source"]["replan_steps"]),
         "feature": "first action-horizon feature from the final diffusion step",
         "training_protocol": {
             "paper": "SAFE arXiv:2506.09937v2 Table 10",
@@ -432,10 +452,16 @@ def train(
             "seed": seed,
             "epochs": epochs,
         },
+        "environment": _environment_versions(),
         "source_features": {
             "manifest": str((feature_dir / "manifest.json").resolve()),
             "sha256": file_sha256(feature_dir / "manifest.json"),
-            "source_run_json_sha256": feature_manifest["source"]["run_json_sha256"],
+            "source_run_json_sha256s": [
+                item["run_json_sha256"]
+                for item in feature_manifest["source"].get(
+                    "runs", [feature_manifest["source"]]
+                )
+            ],
         },
         "checkpoint": artifact_record(checkpoint_path),
         "configuration": artifact_record(config_path),

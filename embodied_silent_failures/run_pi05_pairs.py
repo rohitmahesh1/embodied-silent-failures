@@ -15,6 +15,7 @@ from embodied_silent_failures.pi05_contract import (
     LIBERO_REVISION,
     OPENPI_REVISION,
     POLICY_CONFIG,
+    validate_replan_steps,
 )
 from embodied_silent_failures.pi05_pair import (
     PAIR_CONDITIONS,
@@ -79,8 +80,7 @@ def _arguments() -> argparse.Namespace:
     )
     if args.seed < 0 or args.wait_steps < 0:
         raise ValueError("seed and wait steps must be non-negative")
-    if args.replan_steps != 5:
-        raise ValueError("primary pi0.5 stale-camera campaign requires replan_steps=5")
+    validate_replan_steps(args.replan_steps)
     if args.max_attempts <= 0 or args.server_start_attempts <= 0:
         raise ValueError("attempt counts must be positive")
     return args
@@ -107,7 +107,9 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _prepare_run(
-    args: argparse.Namespace, plan: list[Trial], source_run_sha256: str
+    args: argparse.Namespace,
+    plan: list[Trial],
+    source_run_sha256s: tuple[str, ...],
 ) -> dict[str, Any]:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     path = args.output_dir / "run.json"
@@ -121,7 +123,7 @@ def _prepare_run(
         "trial_plan": [trial.to_dict() for trial in plan],
         "stale_manifest": str(args.stale_manifest.resolve()),
         "stale_manifest_sha256": file_sha256(args.stale_manifest),
-        "source_clean_run_json_sha256": source_run_sha256,
+        "source_clean_run_json_sha256s": list(source_run_sha256s),
         "repository_states": {
             "experiment_code": git_state(project_root),
             "openpi": git_state(args.openpi_root),
@@ -140,7 +142,7 @@ def _prepare_run(
         "configuration",
         "trial_plan",
         "stale_manifest_sha256",
-        "source_clean_run_json_sha256",
+        "source_clean_run_json_sha256s",
     ):
         if existing.get(key) != value.get(key):
             raise ValueError(f"resume run disagrees on {key}")
@@ -212,8 +214,10 @@ def main() -> None:
             raise FileNotFoundError(path)
 
     manifest = load_manifest(args.stale_manifest)
+    if manifest.replan_steps != args.replan_steps:
+        raise ValueError("runner and stale manifest disagree on replan_steps")
     plan = sorted(manifest.specs)
-    _prepare_run(args, plan, manifest.source_run_json_sha256)
+    _prepare_run(args, plan, manifest.source_run_json_sha256s)
     lock_path = args.output_dir / "campaign.lock"
     lock = lock_path.open("w", encoding="utf-8")
     try:
