@@ -172,6 +172,27 @@ def reduce_graph(
     }
 
 
+def raw_trace_edges(
+    events: list[dict[str, Any]],
+) -> set[tuple[str, str, str, str]]:
+    """Return value-carrying trace edges with temporal relations classified."""
+    trace_events = {
+        event["event_id"]: event
+        for event in events
+        if event["kind"] in TRACE_EVENT_KINDS
+    }
+    edges, _overlaps = _data_edges(trace_events)
+    return {
+        (
+            source,
+            target,
+            _temporal_edge_kind(trace_events, source, target, kind),
+            value,
+        )
+        for source, target, kind, value in edges
+    }
+
+
 def _data_edges(
     event_by_id: dict[str, dict[str, Any]],
 ) -> tuple[set[tuple[str, str, str, str]], list[dict[str, Any]]]:
