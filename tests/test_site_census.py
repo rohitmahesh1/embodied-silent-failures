@@ -46,6 +46,7 @@ class SiteCensusTests(unittest.TestCase):
                 ),
                 _region("action-path", "decode", "action_tokens"),
                 _region("action", "decode", "raw_action"),
+                _region("command", "environment", "simulator_command"),
                 _region("monitor-path", "feature", "final_layer_action_features"),
                 _region("monitor-evidence", "feature", "safe_feature"),
                 _region("future", "environment", "environment_observation"),
@@ -53,6 +54,7 @@ class SiteCensusTests(unittest.TestCase):
             "edges": [
                 {"source": "shared", "target": "action-path", "kind": "dataflow"},
                 {"source": "action-path", "target": "action", "kind": "dataflow"},
+                {"source": "action", "target": "command", "kind": "dataflow"},
                 {"source": "shared", "target": "monitor-path", "kind": "dataflow"},
                 {
                     "source": "monitor-path",
@@ -79,6 +81,7 @@ class SiteCensusTests(unittest.TestCase):
             sites["shared"]["topology"], "shared_action_and_monitor_evidence"
         )
         self.assertEqual(sites["action-path"]["topology"], "action_only")
+        self.assertEqual(sites["command"]["topology"], "action_only")
         self.assertEqual(
             sites["monitor-path"]["topology"], "monitor_evidence_only"
         )
@@ -98,6 +101,18 @@ class SiteCensusTests(unittest.TestCase):
             sites["shared"]["observed_value_schema"]["outputs"][0]["shape"],
             [2, 3],
         )
+        self.assertEqual(
+            sites["shared"]["same_decision_reachability"],
+            {"action_sink": True, "monitor_evidence_sink": True},
+        )
+        self.assertEqual(
+            census["anchors"]["action"]["fault_interface"],
+            "simulator_command",
+        )
+        self.assertIn(
+            "action-command",
+            census["trust_boundary"]["derived"],
+        )
 
     def test_unknown_anchor_is_rejected(self) -> None:
         graph = {
@@ -105,7 +120,7 @@ class SiteCensusTests(unittest.TestCase):
             "edges": [],
             "sinks": [],
         }
-        with self.assertRaisesRegex(ValueError, "safe_feature"):
+        with self.assertRaisesRegex(ValueError, "simulator_command"):
             build_site_census(graph, [_event("action")])
 
 

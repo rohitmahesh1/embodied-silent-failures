@@ -8,9 +8,10 @@ from typing import Any
 from embodied_silent_failures.provenance import file_sha256
 
 
-# OpenVLA 300dce2, OpenVLAForActionPrediction.predict_action returns the
-# decoded, unnormalized action at the adapter's raw_action boundary.
-DEFAULT_ACTION_INTERFACE = "raw_action"
+# OpenVLA 300dce2 produces a decoded action in predict_action; the pinned
+# LIBERO runner then normalizes its gripper and passes the resulting command to
+# env.step at the adapter's simulator_command boundary.
+DEFAULT_ACTION_INTERFACE = "simulator_command"
 
 # SAFE b6036ab, failure_prob.data.openvla.load_rollouts and
 # failure_prob.data.utils.process_tensor_idx_rel select the final action-token
@@ -222,8 +223,8 @@ def build_site_census(
                 in {"persistent_model_state", "declared_runtime_boundary"},
                 "topology": _topology(action, monitor),
                 "same_decision_reachability": {
-                    "raw_action": action,
-                    "safe_feature": monitor,
+                    "action_sink": action,
+                    "monitor_evidence_sink": monitor,
                 },
                 "eventual_reachability": {
                     "monitor_timeline": "rollout.monitor_timeline" in reachable_sinks,
@@ -268,10 +269,10 @@ def build_site_census(
                 "adapter provenance come from the audited trace artifacts."
             ),
             "derived": (
-                "Topology is reverse reachability to the declared raw-action and "
-                "SAFE-feature anchors after removing temporal edges. Depth is the "
-                "literal layer or block index divided by the largest observed index "
-                "in the same module-path family."
+                "Topology is reverse reachability to the declared action-command "
+                "and SAFE-feature anchors after removing temporal edges. Depth is "
+                "the literal layer or block index divided by the largest observed "
+                "index in the same module-path family."
             ),
             "not_established": (
                 "The census does not establish site importance, tensor-value drift, "
