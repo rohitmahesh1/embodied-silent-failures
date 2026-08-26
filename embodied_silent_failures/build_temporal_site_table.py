@@ -37,6 +37,20 @@ def _source_id(path: Path, metadata: dict[str, Any]) -> str:
     return f"{path.parent.name}/{path.name}:task{task_id}:ep{episode}:{condition}"
 
 
+def _builder_artifacts() -> dict[str, dict[str, str]]:
+    package_root = Path(__file__).resolve().parent
+    paths = {
+        "entrypoint": Path(__file__).resolve(),
+        "trace_interpreter": package_root / "evidence_graph" / "temporal_trace.py",
+        "table_aggregation": package_root / "evidence_graph" / "temporal_sites.py",
+        "raw_edge_reducer": package_root / "evidence_graph" / "reduce.py",
+    }
+    return {
+        name: {"path": str(path), "sha256": file_sha256(path)}
+        for name, path in paths.items()
+    }
+
+
 def _sources(paths: list[Path]) -> Iterator[dict[str, Any]]:
     for path in paths:
         raw_path = path / "raw.jsonl"
@@ -79,6 +93,7 @@ def main() -> None:
         action_interface=args.action_interface,
         monitor_interface=args.monitor_interface,
     )
+    table["builder_artifacts"] = _builder_artifacts()
     write_json_atomic(args.output, table)
     write_csv_atomic(args.csv, csv_rows(table))
     print(json.dumps(table["counts"], indent=2, sort_keys=True))
