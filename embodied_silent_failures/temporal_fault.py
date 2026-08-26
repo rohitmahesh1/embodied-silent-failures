@@ -242,7 +242,7 @@ class TemporalReplacementInjector:
         self._trial_seed: int | None = None
         self._policy_step: int | None = None
         self._module_call_index = 0
-        self._boundary_calls: dict[str, int] = {}
+        self._boundary_calls: dict[tuple[int, str], int] = {}
         self._source: Any = None
         self._record: dict[str, Any] | None = None
         self._observer: Any = None
@@ -323,8 +323,12 @@ class TemporalReplacementInjector:
         identity = self.spec.identity
         if identity["kind"] != "declared_runtime_boundary":
             return output
-        call_index = self._boundary_calls.get(event_name, 0)
-        self._boundary_calls[event_name] = call_index + 1
+        active_step = self._policy_step if policy_step is None else policy_step
+        if active_step is None:
+            raise RuntimeError("temporal boundary ran outside a policy step")
+        call_key = (active_step, event_name)
+        call_index = self._boundary_calls.get(call_key, 0)
+        self._boundary_calls[call_key] = call_index + 1
         if event_name != identity["event_name"]:
             return output
         if call_index != int(identity["event_call_index"]):
