@@ -76,7 +76,9 @@ def _safe_index(json_value: dict[str, Any], archive_path: Path) -> dict[str, Any
     alphas = archive["alphas"].astype(float)
     primary = float(json_value["monitor"]["primary_alpha"])
     candidates = [
-        index for index, alpha in enumerate(alphas) if math.isclose(alpha, primary)
+        index
+        for index, alpha in enumerate(alphas)
+        if math.isclose(alpha, primary, rel_tol=0, abs_tol=1e-8)
     ]
     if len(candidates) != 1:
         raise ValueError("SAFE archive does not contain one primary alpha")
