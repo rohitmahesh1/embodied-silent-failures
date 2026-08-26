@@ -36,7 +36,10 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--safe-root", required=True, type=Path)
     parser.add_argument("--monitor-dir", required=True, type=Path)
     parser.add_argument(
-        "--run-dir", required=True, action="append", dest="run_dirs", type=Path
+        "--run-dir", action="append", dest="run_dirs", type=Path, default=[]
+    )
+    parser.add_argument(
+        "--campaign-dir", action="append", dest="campaign_dirs", type=Path, default=[]
     )
     parser.add_argument("--output-prefix", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -156,6 +159,17 @@ def _validate_monitor(monitor_dir: Path) -> tuple[dict[str, Any], dict[str, Path
 
 def main() -> None:
     args = _parse_arguments()
+    for campaign_dir in args.campaign_dirs:
+        attempt_root = campaign_dir / "attempts"
+        if not attempt_root.is_dir():
+            raise FileNotFoundError(
+                f"SAFE campaign attempt directory does not exist: {attempt_root}"
+            )
+        args.run_dirs.extend(
+            path
+            for path in sorted(attempt_root.iterdir())
+            if path.is_dir() and any(path.glob("*.complete.json"))
+        )
     if args.batch_size <= 0:
         raise ValueError("batch size must be positive")
     project_root = Path(__file__).resolve().parents[1]

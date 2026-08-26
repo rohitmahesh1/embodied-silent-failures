@@ -6,10 +6,44 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from embodied_silent_failures.provenance import git_dirty, git_revision
+
 
 OPENVLA_REVISION = "300dce26d44f407c725695d16cd445755c92cbd1"
 LIBERO_REVISION = "8f1084e3132a39270c3a13ebe37270a43ece2a01"
 CHECKPOINT_REVISION = "80970322773f81baa2e22fe495d0487b93a05cfa"
+
+
+def validate_pinned_runtime(
+    checkpoint: Path,
+    openvla_root: Path,
+    libero_root: Path,
+    *,
+    project_root: Path | None = None,
+) -> None:
+    for name, path in (
+        ("checkpoint", checkpoint),
+        ("OpenVLA root", openvla_root),
+        ("LIBERO root", libero_root),
+    ):
+        if not path.is_dir():
+            raise FileNotFoundError(f"{name} is not a directory: {path}")
+    if CHECKPOINT_REVISION not in checkpoint.resolve().parts:
+        raise RuntimeError(
+            "checkpoint is not the pinned OpenVLA snapshot at revision "
+            f"{CHECKPOINT_REVISION}: {checkpoint.resolve()}"
+        )
+    for name, root, expected in (
+        ("OpenVLA", openvla_root, OPENVLA_REVISION),
+        ("LIBERO", libero_root, LIBERO_REVISION),
+    ):
+        actual = git_revision(root)
+        if actual != expected:
+            raise RuntimeError(f"{name} revision is {actual}, expected {expected}")
+        if git_dirty(root):
+            raise RuntimeError(f"{name} has uncommitted changes: {root}")
+    if project_root is not None and git_dirty(project_root):
+        raise RuntimeError(f"experiment code has uncommitted changes: {project_root}")
 
 
 @dataclass(frozen=True)

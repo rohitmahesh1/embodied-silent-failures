@@ -29,9 +29,16 @@ from embodied_silent_failures.replay import (
     replay_action,
 )
 from embodied_silent_failures.stale_image_manifest import StaleImageSpec
+from embodied_silent_failures.temporal_fault import (
+    TemporalProcessor,
+    TemporalReplacementInjector,
+    decode_action_tokens,
+)
 
 
 REPLAY_OBSERVATION_TOLERANCE = 1e-6
+TEMPORAL_PREFIX_ACTION_TOLERANCE = 1e-8
+TEMPORAL_PREFIX_FEATURE_TOLERANCE = 1e-5
 MAX_STEPS = {
     "libero_spatial": 220,
     "libero_object": 280,
@@ -78,6 +85,19 @@ class CounterfactualReplayTerminated(CounterfactualReplayInvalid):
         super().__init__(
             f"counterfactual replay terminated after step {policy_step}, "
             f"before intervention step {intervention_step}"
+        )
+
+
+class TemporalPrefixDivergence(RuntimeError):
+    reason = "temporal_policy_prefix_diverged_before_intervention"
+
+    def __init__(self, policy_step: int, action_error: float, feature_error: float):
+        self.policy_step = policy_step
+        self.action_error = action_error
+        self.feature_error = feature_error
+        super().__init__(
+            f"temporal policy prefix diverged at step {policy_step}: action error "
+            f"{action_error:.3g}, SAFE-feature error {feature_error:.3g}"
         )
 
 
@@ -154,11 +174,12 @@ def run_trial(
     trial_seed: int,
     initial_state_sha256: str,
     run_condition: str,
-    fault_injector: TransientActivationFault | None,
+    fault_injector: TransientActivationFault | TemporalReplacementInjector | None,
     clean_trace: CleanTrace | None,
     stale_image_spec: StaleImageSpec | None,
     execution: dict[str, Any],
     evidence: RolloutEvidence | None = None,
+    replay_clean_prefix: bool = True,
 ) -> dict[str, Any]:
     runtime.torch.cuda.reset_peak_memory_stats()
     rollout_started = time.perf_counter()
@@ -180,6 +201,13 @@ def run_trial(
     success = False
     replay_maximum_error = 0.0
     replayed_steps = 0
+    prefix_maximum_action_error = 0.0
+    prefix_maximum_feature_error = 0.0
+    temporal_injector = (
+        fault_injector
+        if isinstance(fault_injector, TemporalReplacementInjector)
+        else None
+    )
     if fault_injector is not None:
         fault_injector.begin_trial(trial_seed)
     intervention_step = None
@@ -204,6 +232,7 @@ def run_trial(
             clean_trace is not None
             and intervention_step is not None
             and policy_step < intervention_step
+            and replay_clean_prefix
         ):
             image = runtime.get_libero_image(observation, resize_size)
             freshness = None
@@ -289,7 +318,18 @@ def run_trial(
                 raise CounterfactualReplayTerminated(policy_step, intervention_step)
             continue
 
-        image = runtime.get_libero_image(observation, resize_size)
+        policy_source_observation = observation
+        if temporal_injector is not None:
+            policy_source_observation = temporal_injector.boundary(
+                "libero.current_observation",
+                observation,
+                policy_step=policy_step,
+            )
+        image = runtime.get_libero_image(policy_source_observation, resize_size)
+        if temporal_injector is not None:
+            image = temporal_injector.boundary(
+                "libero.current_image", image, policy_step=policy_step
+            )
         policy_image = image
         if stale_image_spec is not None and policy_step == stale_image_spec.policy_step:
             if stale_image_spec.source_policy_step != (
@@ -308,11 +348,15 @@ def run_trial(
             image_intervention_record = build_image_intervention_record(
                 stale_image_spec, config.image_input_mode, trial_seed
             )
+        if temporal_injector is not None:
+            policy_image = temporal_injector.boundary(
+                "policy.selected_image", policy_image, policy_step=policy_step
+            )
         state = runtime.np.concatenate(
             (
-                observation["robot0_eef_pos"],
-                runtime.quat2axisangle(observation["robot0_eef_quat"]),
-                observation["robot0_gripper_qpos"],
+                policy_source_observation["robot0_eef_pos"],
+                runtime.quat2axisangle(policy_source_observation["robot0_eef_quat"]),
+                policy_source_observation["robot0_gripper_qpos"],
             )
         )
         policy_observation = {"full_image": policy_image, "state": state}
@@ -377,6 +421,10 @@ def run_trial(
             if evidence is not None
             else processor
         )
+        if temporal_injector is not None:
+            evidence_processor = TemporalProcessor(
+                evidence_processor, temporal_injector
+            )
         with runtime.torch.inference_mode(), fault_context:
             raw_actions, generated = runtime.get_action(
                 model_config,
@@ -386,10 +434,31 @@ def run_trial(
                 processor=evidence_processor,
                 n_samples=1,
             )
+            if temporal_injector is not None:
+                generated = temporal_injector.boundary(
+                    "openvla.policy_call", generated
+                )
+                action_tokens = generated["sequences"][:, -model.get_action_dim(
+                    model_config.unnorm_key
+                ) :]
+                action_tokens = temporal_injector.boundary(
+                    "openvla.action_tokens", action_tokens
+                )
+                if temporal_injector.requires_action_redecode():
+                    raw_actions = decode_action_tokens(
+                        model,
+                        action_tokens,
+                        model_config.unnorm_key,
+                        runtime.np,
+                    )
         runtime.torch.cuda.synchronize()
         inference_seconds.append(time.perf_counter() - inference_started)
 
         raw_action = runtime.np.asarray(raw_actions).copy()
+        if temporal_injector is not None:
+            raw_action = temporal_injector.boundary(
+                "openvla.raw_action", raw_action, policy_step=policy_step
+            )
         if raw_action.shape != (7,):
             raise ValueError(f"unexpected OpenVLA action shape: {raw_action.shape}")
         if evidence is not None:
@@ -405,13 +474,53 @@ def run_trial(
         else:
             action = runtime.normalize_gripper_action(raw_action.copy(), binarize=True)
             action = runtime.invert_gripper_action(action)
+        if temporal_injector is not None:
+            action = temporal_injector.boundary(
+                "libero.executed_command", action, policy_step=policy_step
+            )
         proposed_action = runtime.np.asarray(action).copy()
         if response_applied:
             if previous_executed_action is None:
                 raise RuntimeError("freshness hold has no previous executed action")
             action = hold_action(runtime.np, previous_executed_action)
 
-        hidden_history.append(_extract_hidden_states(runtime, generated))
+        hidden = _extract_hidden_states(runtime, generated)
+        if (
+            temporal_injector is not None
+            and clean_trace is not None
+            and intervention_step is not None
+            and policy_step < intervention_step
+        ):
+            expected_action = replay_action(runtime.np, clean_trace, policy_step)
+            action_error = float(
+                runtime.np.max(
+                    runtime.np.abs(
+                        runtime.np.asarray(action, dtype=float) - expected_action
+                    )
+                )
+            )
+            expected_feature = runtime.torch.as_tensor(
+                clean_trace.hidden_states[policy_step]
+            ).to(runtime.torch.float32)
+            feature_error = float(
+                runtime.torch.max(
+                    runtime.torch.abs(hidden.to(runtime.torch.float32) - expected_feature)
+                ).item()
+            )
+            prefix_maximum_action_error = max(
+                prefix_maximum_action_error, action_error
+            )
+            prefix_maximum_feature_error = max(
+                prefix_maximum_feature_error, feature_error
+            )
+            if (
+                action_error > TEMPORAL_PREFIX_ACTION_TOLERANCE
+                or feature_error > TEMPORAL_PREFIX_FEATURE_TOLERANCE
+            ):
+                raise TemporalPrefixDivergence(
+                    policy_step, action_error, feature_error
+                )
+        hidden_history.append(hidden)
         observation_history.append(_numeric_observation(runtime, observation))
         policy_images.append(image.copy())
         if config.save_video:
@@ -585,7 +694,22 @@ def run_trial(
                 "observation_tolerance": REPLAY_OBSERVATION_TOLERANCE,
                 "clean_source_directory": str(clean_trace.source_dir),
             }
-            if clean_trace is not None
+            if clean_trace is not None and replay_clean_prefix
+            else {"enabled": False}
+        ),
+        "paired_prefix_validation": (
+            {
+                "enabled": True,
+                "clean_source_directory": str(clean_trace.source_dir),
+                "verified_policy_steps": int(intervention_step or 0),
+                "maximum_numeric_observation_error": replay_maximum_error,
+                "maximum_executed_action_error": prefix_maximum_action_error,
+                "maximum_safe_feature_error": prefix_maximum_feature_error,
+                "observation_tolerance": REPLAY_OBSERVATION_TOLERANCE,
+                "action_tolerance": TEMPORAL_PREFIX_ACTION_TOLERANCE,
+                "safe_feature_tolerance": TEMPORAL_PREFIX_FEATURE_TOLERANCE,
+            }
+            if temporal_injector is not None and clean_trace is not None
             else {"enabled": False}
         ),
         "evidence_graph": evidence_result,
