@@ -10,7 +10,12 @@ DETECTED_FAULT_FAILURE = "detected_fault_failure"
 SILENT_FAULT_FAILURE = "silent_fault_failure"
 BASELINE_FAILURE = "baseline_failure"
 TREATMENT_CONDITIONS = frozenset(
-    {"activation_fault", "current_image_control", "stale_image"}
+    {
+        "activation_control",
+        "activation_fault",
+        "current_image_control",
+        "stale_image",
+    }
 )
 
 

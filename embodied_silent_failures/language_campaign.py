@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import random
+import re
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+from embodied_silent_failures.provenance import file_sha256, load_json
+from embodied_silent_failures.temporal_campaign import PHASES, clean_success_frame
+
+
+ACTION_TOKEN_COUNT = 7
+LANGUAGE_BLOCK_COUNT = 32
+TRAJECTORIES_PER_TASK = 5
+DEVELOPMENT_TRAJECTORIES_PER_TASK = 3
+_BLOCK_PATH = re.compile(r"^policy\.language_model\.model\.layers\.(\d+)$")
+
+
+def language_block_sites(table: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the traced residual output for every block and generation call."""
+    # build_temporal_site_table.py records executed module paths and ports from
+    # SAFE OpenVLA 300dce26. This filter selects the observed Llama block return
+    # `value[0]`; it does not infer or name architectural regions by hand.
+    selected = []
+    for site in table["sites"]:
+        identity = site.get("identity", {})
+        match = _BLOCK_PATH.fullmatch(str(identity.get("module_path", "")))
+        if (
+            site.get("status") != "structurally_eligible_pending_canary"
+            or identity.get("kind") != "module_output"
+            or identity.get("output_port") != "value[0]"
+            or match is None
+        ):
+            continue
+        selected.append(
+            {
+                "layer_index": int(match.group(1)),
+                "action_token_position": int(identity["module_call_index"]),
+                "site_id": site["site_id"],
+                "identity": identity,
+                "observed_schemas": site["schemas"],
+                "topologies": site["topologies"],
+            }
+        )
+
+    expected = {
+        (layer, token)
+        for layer in range(LANGUAGE_BLOCK_COUNT)
+        for token in range(ACTION_TOKEN_COUNT)
+    }
+    observed = {
+        (site["layer_index"], site["action_token_position"])
+        for site in selected
+    }
+    if observed != expected or len(selected) != len(expected):
+        missing = sorted(expected - observed)
+        extra = sorted(observed - expected)
+        raise ValueError(
+            "language-block site table is not a 32 block x 7 token census: "
+            f"missing={missing[:8]}, extra={extra[:8]}, records={len(selected)}"
+        )
+    return sorted(
+        selected,
+        key=lambda site: (site["layer_index"], site["action_token_position"]),
+    )
+
+
+def select_clean_trajectories(
+    clean_frame: list[dict[str, Any]], *, seed: int
+) -> list[dict[str, Any]]:
+    by_task: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for trajectory in clean_frame:
+        by_task[int(trajectory["task_id"])].append(trajectory)
+    if sorted(by_task) != list(range(10)):
+        raise ValueError("clean-success frame does not contain all ten LIBERO-10 tasks")
+
+    rng = random.Random(seed)
+    selected = []
+    for task_id in range(10):
+        population = sorted(
+            by_task[task_id], key=lambda value: int(value["episode_index"])
+        )
+        if len(population) < TRAJECTORIES_PER_TASK:
+            raise ValueError(f"task {task_id} has fewer than five clean successes")
+        sample = rng.sample(population, TRAJECTORIES_PER_TASK)
+        for index, trajectory in enumerate(sample):
+            selected.append(
+                {
+                    **trajectory,
+                    "analysis_split": (
+                        "development"
+                        if index < DEVELOPMENT_TRAJECTORIES_PER_TASK
+                        else "holdout"
+                    ),
+                    "task_success_population": len(population),
+                    "trajectory_inclusion_probability": (
+                        TRAJECTORIES_PER_TASK / len(population)
+                    ),
+                }
+            )
+    return selected
+
+
+def build_contexts(
+    trajectories: list[dict[str, Any]], *, seed: int
+) -> list[dict[str, Any]]:
+    contexts = []
+    for trajectory in trajectories:
+        policy_steps = int(trajectory["policy_steps"])
+        if policy_steps < 2:
+            raise ValueError("selected clean trajectory has no temporal pair")
+        for phase, fraction in PHASES.items():
+            policy_step = max(
+                1,
+                min(policy_steps - 1, round((policy_steps - 1) * fraction)),
+            )
+            contexts.append(
+                {
+                    "task_id": int(trajectory["task_id"]),
+                    "episode_index": int(trajectory["episode_index"]),
+                    "trial_seed": int(trajectory["trial_seed"]),
+                    "initial_state_sha256": trajectory["initial_state_sha256"],
+                    "clean_policy_steps": policy_steps,
+                    "analysis_split": trajectory["analysis_split"],
+                    "phase": phase,
+                    "phase_fraction": fraction,
+                    "policy_step": policy_step,
+                    "source_policy_step": policy_step - 1,
+                }
+            )
+
+    contexts.sort(
+        key=lambda value: (
+            value["task_id"],
+            value["episode_index"],
+            PHASES[value["phase"]],
+        )
+    )
+    assignment_rng = random.Random(seed ^ 0x7A11C0DE)
+    complete_cycles, remainder = divmod(len(contexts), ACTION_TOKEN_COUNT)
+    token_positions = list(range(ACTION_TOKEN_COUNT)) * complete_cycles
+    token_positions.extend(assignment_rng.sample(range(ACTION_TOKEN_COUNT), remainder))
+    assignment_rng.shuffle(token_positions)
+    trajectory_keys = sorted(
+        {(value["task_id"], value["episode_index"]) for value in contexts}
+    )
+    worker_by_trajectory = {
+        key: index % 2 for index, key in enumerate(trajectory_keys)
+    }
+    for index, (context, token_position) in enumerate(
+        zip(contexts, token_positions, strict=True)
+    ):
+        context["context_id"] = f"c{index:03d}"
+        context["action_token_position"] = token_position
+        context["worker_shard"] = worker_by_trajectory[
+            (context["task_id"], context["episode_index"])
+        ]
+    return contexts
+
+
+def _artifact_record(path: Path) -> dict[str, Any]:
+    return {
+        "source_path": str(path.resolve()),
+        "bytes": path.stat().st_size,
+        "sha256": file_sha256(path),
+    }
+
+
+def build_language_campaign_manifest(
+    table_path: Path,
+    clean_root: Path,
+    *,
+    seed: int,
+) -> dict[str, Any]:
+    table = load_json(table_path)
+    sites = language_block_sites(table)
+    trajectories = select_clean_trajectories(clean_success_frame(clean_root), seed=seed)
+    contexts = build_contexts(trajectories, seed=seed)
+
+    clean_trajectories = []
+    for trajectory in trajectories:
+        source = trajectory["source"]
+        clean_trajectories.append(
+            {
+                **{key: value for key, value in trajectory.items() if key != "source"},
+                "artifacts": {
+                    name: _artifact_record(path) for name, path in source.items()
+                },
+            }
+        )
+
+    token_counts = Counter(
+        context["action_token_position"] for context in contexts
+    )
+    split_counts = Counter(context["analysis_split"] for context in contexts)
+    worker_counts = Counter(context["worker_shard"] for context in contexts)
+    return {
+        "schema_version": 1,
+        "campaign": "openvla_language_block_temporal_replacement",
+        "seed": seed,
+        "fault_model": {
+            "operator": (
+                "replace one block's final action-token vector at decision t "
+                "with the corresponding vector from decision t-1"
+            ),
+            "duration": "one policy inference",
+            "tensor_slice": "value[0][:, -1:, :]",
+        },
+        "site_table": {
+            "path": str(table_path.resolve()),
+            "sha256": file_sha256(table_path),
+        },
+        "sampling_design": {
+            "site_population": "census all 32 language-block residual outputs",
+            "trajectory_sampling": (
+                "seeded uniform sample of five clean-success trajectories per task"
+            ),
+            "phase_fractions": PHASES,
+            "analysis_split": (
+                "within each task, keep three trajectories in development and two "
+                "in holdout; all phases from one trajectory stay together"
+            ),
+            "token_assignment": (
+                "seeded shuffle of a balanced seven-position multiset; counts differ "
+                "by at most one"
+            ),
+            "worker_assignment": (
+                "alternate sorted trajectories between two workers; all three phases "
+                "from one trajectory remain on one worker"
+            ),
+        },
+        "counts": {
+            "language_blocks": LANGUAGE_BLOCK_COUNT,
+            "action_token_positions": ACTION_TOKEN_COUNT,
+            "trajectories": len(trajectories),
+            "contexts": len(contexts),
+            "local_interventions": len(contexts) * LANGUAGE_BLOCK_COUNT,
+            "contexts_by_split": dict(sorted(split_counts.items())),
+            "contexts_by_token_position": {
+                str(key): value for key, value in sorted(token_counts.items())
+            },
+            "contexts_by_worker_shard": {
+                str(key): value for key, value in sorted(worker_counts.items())
+            },
+        },
+        "sites": sites,
+        "clean_trajectories": clean_trajectories,
+        "contexts": contexts,
+    }
+
+
+def manifest_sha256(manifest: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_language_campaign_manifest(manifest: dict[str, Any]) -> None:
+    if manifest.get("schema_version") != 1:
+        raise ValueError("language campaign manifest must use schema version 1")
+    sites = manifest.get("sites")
+    contexts = manifest.get("contexts")
+    if not isinstance(sites, list) or len(sites) != 224:
+        raise ValueError("language campaign must contain the 32 x 7 site census")
+    if not isinstance(contexts, list) or len(contexts) != 150:
+        raise ValueError("language campaign must contain 150 contexts")
+    keys = {
+        (int(site["layer_index"]), int(site["action_token_position"]))
+        for site in sites
+    }
+    if len(keys) != 224:
+        raise ValueError("language campaign sites are duplicated")
+    context_ids = [context.get("context_id") for context in contexts]
+    if None in context_ids or len(set(context_ids)) != len(context_ids):
+        raise ValueError("language campaign context IDs are missing or duplicated")
+    for context in contexts:
+        if int(context["source_policy_step"]) != int(context["policy_step"]) - 1:
+            raise ValueError("language campaign context does not use source step t-1")
+    token_counts = Counter(int(value["action_token_position"]) for value in contexts)
+    if set(token_counts) != set(range(ACTION_TOKEN_COUNT)):
+        raise ValueError("language campaign does not cover all action-token positions")
+    if max(token_counts.values()) - min(token_counts.values()) > 1:
+        raise ValueError("language campaign action-token positions are not balanced")
+    trajectories_by_split: dict[tuple[int, int], set[str]] = defaultdict(set)
+    workers_by_trajectory: dict[tuple[int, int], set[int]] = defaultdict(set)
+    for context in contexts:
+        key = (int(context["task_id"]), int(context["episode_index"]))
+        trajectories_by_split[key].add(str(context["analysis_split"]))
+        workers_by_trajectory[key].add(int(context["worker_shard"]))
+    if any(len(splits) != 1 for splits in trajectories_by_split.values()):
+        raise ValueError("a trajectory appears in both analysis splits")
+    if any(len(workers) != 1 for workers in workers_by_trajectory.values()):
+        raise ValueError("a trajectory is split across workers")
