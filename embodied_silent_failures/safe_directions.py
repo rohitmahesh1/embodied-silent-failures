@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from typing import Any
 
 
@@ -107,4 +108,60 @@ def direction_group_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     result["alarm_at_fault_interventions"] = sum(
         bool(record.get("safe_alarm_at_fault")) for record in records
     )
+    return result
+
+
+def collapse_physical_failures(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record.get("outcome_group") not in {
+            "detected_failure",
+            "silent_failure",
+        }:
+            continue
+        physical_run = record.get("physical_run")
+        if not physical_run:
+            raise ValueError("failed intervention has no physical run")
+        grouped[str(physical_run)].append(record)
+
+    result = []
+    stable_fields = (
+        "outcome_group",
+        "analysis_split",
+        "context_id",
+        "task_id",
+        "episode_index",
+        "phase",
+        "policy_step",
+        "action_token_position",
+        "safe_alarm_at_fault",
+        "safe_alarm_post_fault_any",
+    )
+    for physical_run, members in sorted(grouped.items()):
+        first = members[0]
+        for member in members[1:]:
+            disagreements = [
+                field
+                for field in stable_fields
+                if member.get(field) != first.get(field)
+            ]
+            if disagreements:
+                raise ValueError(
+                    f"physical failure {physical_run} disagrees on {disagreements}"
+                )
+        branch = {
+            "physical_run": physical_run,
+            "member_interventions": len(members),
+            **{field: first.get(field) for field in stable_fields},
+        }
+        for field in DIRECTION_FIELDS:
+            values = [
+                float(member[field])
+                for member in members
+                if member.get(field) is not None
+            ]
+            branch[field] = _median(values)
+        result.append(branch)
     return result

@@ -68,9 +68,10 @@ def roc_auc(labels: list[bool], values: list[float]) -> float:
     )
 
 
-def command_signal_auc(
+def clustered_signal_auc(
     rows: list[dict[str, Any]],
     signal: str,
+    outcome: str,
     *,
     bootstrap_samples: int,
     seed: int,
@@ -78,14 +79,14 @@ def command_signal_auc(
     eligible = [
         row
         for row in rows
-        if row.get("eligible_causal_outcome") and row.get(signal) is not None
+        if row.get(signal) is not None and row.get(outcome) is not None
     ]
-    labels = [bool(row["command_changed"]) for row in eligible]
+    labels = [bool(row[outcome]) for row in eligible]
     values = [float(row[signal]) for row in eligible]
     result = {
         "signal": signal,
         "interventions": len(eligible),
-        "command_changes": sum(labels),
+        "positive_outcomes": sum(labels),
         "roc_auc": roc_auc(labels, values),
         "trajectory_cluster_bootstrap_95": None,
         "bootstrap_valid_samples": 0,
@@ -150,6 +151,25 @@ def command_signal_auc(
         if estimates
         else None
     )
+    return result
+
+
+def command_signal_auc(
+    rows: list[dict[str, Any]],
+    signal: str,
+    *,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, Any]:
+    eligible = [row for row in rows if row.get("eligible_causal_outcome")]
+    result = clustered_signal_auc(
+        eligible,
+        signal,
+        "command_changed",
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
+    result["command_changes"] = result.pop("positive_outcomes")
     return result
 
 
@@ -305,6 +325,13 @@ def branch_summary(branches: list[dict[str, Any]]) -> dict[str, Any]:
     detected = [
         branch for branch in failures if not branch["operational_silent_failure"]
     ]
+    contexts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for branch in branches:
+        contexts[str(branch["context_id"])].append(branch)
+    context_rates = [
+        sum(branch["task_failure"] for branch in values) / len(values)
+        for values in contexts.values()
+    ]
     return {
         "changed_command_branches": len(branches),
         "task_failure_branches": len(failures),
@@ -316,5 +343,25 @@ def branch_summary(branches: list[dict[str, Any]]) -> dict[str, Any]:
         "alarm_within_25_branches": sum(
             branch["safe_alarm_within_25"] for branch in branches
         ),
+        "restored_contexts": {
+            "contexts": len(contexts),
+            "contexts_with_multiple_commands": sum(
+                len(values) > 1 for values in contexts.values()
+            ),
+            "contexts_with_both_success_and_failure": sum(
+                0 < sum(branch["task_failure"] for branch in values) < len(values)
+                for values in contexts.values()
+            ),
+            "all_success_contexts": sum(rate == 0 for rate in context_rates),
+            "all_failure_contexts": sum(rate == 1 for rate in context_rates),
+            "median_commands_per_context": (
+                _percentile([float(len(values)) for values in contexts.values()], 0.5)
+                if contexts
+                else None
+            ),
+            "median_task_failure_rate": (
+                _percentile(context_rates, 0.5) if context_rates else None
+            ),
+        },
         "command_magnitude_fifths": equal_count_fifths(branches),
     }

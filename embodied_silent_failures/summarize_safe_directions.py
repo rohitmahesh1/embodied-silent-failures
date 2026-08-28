@@ -7,9 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import write_csv_atomic, write_json_atomic
-from embodied_silent_failures.language_gates import command_signal_auc
+from embodied_silent_failures.language_gates import (
+    clustered_signal_auc,
+    command_signal_auc,
+)
 from embodied_silent_failures.provenance import file_sha256, load_json
-from embodied_silent_failures.safe_directions import direction_group_summary
+from embodied_silent_failures.safe_directions import (
+    collapse_physical_failures,
+    direction_group_summary,
+)
 
 
 def _arguments() -> argparse.Namespace:
@@ -57,6 +63,24 @@ def main() -> None:
     outcome_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in eligible:
         outcome_groups[str(record["outcome_group"])].append(record)
+    physical_failures = collapse_physical_failures(eligible)
+    physical_outcome_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in physical_failures:
+        record["eventually_detected"] = (
+            record["outcome_group"] == "detected_failure"
+        )
+        margin = record.get("threshold_margin_after_fault")
+        record["threshold_proximity_after_fault"] = (
+            -float(margin) if margin is not None else None
+        )
+        physical_outcome_groups[str(record["outcome_group"])].append(record)
+    physical_split_groups: dict[str, dict[str, list[dict[str, Any]]]] = {
+        split: defaultdict(list) for split in ("development", "holdout")
+    }
+    for record in physical_failures:
+        physical_split_groups[str(record["analysis_split"])][
+            str(record["outcome_group"])
+        ].append(record)
     command_groups = {
         "unchanged": [record for record in eligible if not record["command_changed"]],
         "changed": [record for record in eligible if record["command_changed"]],
@@ -65,6 +89,20 @@ def main() -> None:
         split: [record for record in eligible if record["analysis_split"] == split]
         for split in ("development", "holdout")
     }
+    physical_by_split = {
+        split: [
+            record
+            for record in physical_failures
+            if record["analysis_split"] == split
+        ]
+        for split in ("development", "holdout")
+    }
+    detection_signals = (
+        "threshold_proximity_after_fault",
+        "absolute_monitor_increment_delta",
+        "monitor_secant_sensitivity",
+        "selected_feature_normalized_l2",
+    )
 
     output = {
         "schema_version": 1,
@@ -98,6 +136,40 @@ def main() -> None:
         "by_terminal_outcome": {
             name: direction_group_summary(values)
             for name, values in sorted(outcome_groups.items())
+        },
+        "by_unique_physical_failure": {
+            "method": (
+                "Take the median across layer interventions that produced the same "
+                "executed command and shared one physical rollout, then summarize "
+                "those unique branches."
+            ),
+            "physical_failure_branches": len(physical_failures),
+            "outcomes": {
+                name: direction_group_summary(values)
+                for name, values in sorted(physical_outcome_groups.items())
+            },
+            "splits": {
+                split: {
+                    name: direction_group_summary(values)
+                    for name, values in sorted(groups.items())
+                }
+                for split, groups in physical_split_groups.items()
+            },
+            "signals_for_eventual_detection": {
+                split: {
+                    signal: clustered_signal_auc(
+                        values,
+                        signal,
+                        "eventually_detected",
+                        bootstrap_samples=args.bootstrap_samples,
+                        seed=args.seed + 1_000 + split_index * 100 + signal_index,
+                    )
+                    for signal_index, signal in enumerate(detection_signals)
+                }
+                for split_index, (split, values) in enumerate(
+                    physical_by_split.items()
+                )
+            },
         },
         "worker_score_reconstruction": {
             str(document["source_campaign"]["worker_shard"]): document["coverage"]
