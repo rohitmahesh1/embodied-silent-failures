@@ -216,6 +216,7 @@ def physical_command_branches(
 
         stable_fields = (
             "analysis_split",
+            "worker_shard",
             "context_id",
             "task_id",
             "episode_index",
@@ -261,6 +262,7 @@ def physical_command_branches(
         branch = {
             "physical_run": physical_run,
             "analysis_split": first_row["analysis_split"],
+            "worker_shard": int(first_row["worker_shard"]),
             "context_id": first_row["context_id"],
             "task_id": int(first_row["task_id"]),
             "episode_index": int(first_row["episode_index"]),
