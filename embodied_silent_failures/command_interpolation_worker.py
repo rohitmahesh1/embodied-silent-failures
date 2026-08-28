@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -19,10 +20,61 @@ from embodied_silent_failures.provenance import file_sha256, load_json
 
 
 CONDITION = "command_interpolation_task_boundary"
+COMMAND_COLUMNS = (
+    "action/dx",
+    "action/dy",
+    "action/dz",
+    "action/droll",
+    "action/dpitch",
+    "action/dyaw",
+    "action/dgripper",
+)
 
 
 def _lambda_label(value: float) -> str:
     return f"lambda-{value:.6f}".replace(".", "p")
+
+
+def _archived_prefix(
+    source_campaign_dir: Path,
+    context: dict[str, Any],
+    runtime: Any,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    # Campaign commit 88a0def, language_context.py::capture_context wrote these
+    # commands to the control CSV. Replaying them defines the same causal state
+    # without assuming a fresh OpenVLA inference reproduces every prefix bit.
+    context_id = str(context["context_id"])
+    control_dir = source_campaign_dir / "attempts" / f"{context_id}-control"
+    completions = sorted(control_dir.glob("*.complete.json"))
+    if len(completions) != 1:
+        raise ValueError(
+            f"expected one archived control completion for {context_id}, "
+            f"found {len(completions)}"
+        )
+    completion = load_json(completions[0])
+    if completion.get("status") != "complete" or not completion.get("success"):
+        raise ValueError(f"archived control did not succeed for {context_id}")
+    csv_path = control_dir / completion["files"]["csv"]
+    with csv_path.open(newline="") as file:
+        rows = list(csv.DictReader(file))
+    policy_steps = int(context["policy_step"])
+    if len(rows) <= policy_steps:
+        raise ValueError(f"archived control is too short for {context_id}")
+    prefix = []
+    for step, row in enumerate(rows[:policy_steps]):
+        if int(row["action/timestep"]) != step:
+            raise ValueError(f"archived control timestep changed for {context_id}")
+        command = runtime.np.asarray(
+            [float(row[column]) for column in COMMAND_COLUMNS], dtype=float
+        )
+        if not bool(runtime.np.isfinite(command).all()):
+            raise ValueError(f"archived control command is non-finite for {context_id}")
+        prefix.append(command)
+    return tuple(prefix), {
+        "completion_sha256": file_sha256(completions[0]),
+        "csv_sha256": file_sha256(csv_path),
+        "commands": len(prefix),
+    }
 
 
 def _run_branch(
@@ -42,6 +94,7 @@ def _run_branch(
     initial_state: Any,
     execution: dict[str, Any],
     source_context_sha256: str,
+    source_prefix: dict[str, Any],
 ) -> dict[str, Any]:
     context = branch_plan["context"]
     output_dir = (
@@ -76,6 +129,7 @@ def _run_branch(
         "interpolation": interpolation,
         "source_physical_run": branch_plan["physical_run"],
         "source_context_sha256": source_context_sha256,
+        "source_prefix": source_prefix,
         "archived_clean_command": clean,
         "archived_failed_command": failed,
         "archived_interpolated_command": declared,
@@ -165,6 +219,9 @@ def run_planned_interpolations(
     if archived["context"] != context:
         raise ValueError(f"archived context metadata changed for {context_id}")
     runtime.set_seed_everywhere(int(context["trial_seed"]))
+    prefix, prefix_provenance = _archived_prefix(
+        source_campaign_dir, context, runtime
+    )
     captured = capture_context(
         runtime,
         policy_config,
@@ -176,6 +233,7 @@ def run_planned_interpolations(
         initial_state,
         context,
         wait_steps=wait_steps,
+        executed_prefix=prefix,
     )
     if (
         captured.simulator_state_sha256
@@ -220,6 +278,7 @@ def run_planned_interpolations(
             initial_state=initial_state,
             execution=execution,
             source_context_sha256=file_sha256(archived_path),
+            source_prefix=prefix_provenance,
         )
         for interpolation in branch_plan["lambdas"]
     ]

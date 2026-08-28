@@ -71,6 +71,7 @@ def capture_context(
     context: dict[str, Any],
     *,
     wait_steps: int,
+    executed_prefix: tuple[Any, ...] | None = None,
 ) -> CapturedContext:
     observation = _start_episode(runtime, env, initial_state, wait_steps)
     prefix_commands = []
@@ -79,7 +80,10 @@ def capture_context(
     source_trace = None
     source_step = int(context["source_policy_step"])
     token_position = int(context["action_token_position"])
-    for policy_step in range(int(context["policy_step"])):
+    policy_steps = int(context["policy_step"])
+    if executed_prefix is not None and len(executed_prefix) != policy_steps:
+        raise ValueError("archived executed-command prefix has the wrong length")
+    for policy_step in range(policy_steps):
         trace_source = policy_step == source_step
         decision = policy_decision(
             runtime,
@@ -93,7 +97,11 @@ def capture_context(
         )
         if trace_source:
             source_trace = decision.trace
-        command = runtime.np.asarray(decision.command).copy()
+        command = runtime.np.asarray(
+            decision.command
+            if executed_prefix is None
+            else executed_prefix[policy_step]
+        ).copy()
         row = _action_row(policy_step, command, decision)
         observation, reward, done, _ = env.step(command.tolist())
         row["environment/reward"] = reward

@@ -49,6 +49,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--source-campaign-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--worker-shard", required=True, type=int, choices=(0, 1))
+    parser.add_argument(
+        "--physical-run",
+        action="append",
+        default=[],
+        help="Run only this planned physical branch; repeat to select more than one.",
+    )
     parser.add_argument("--wait-steps", type=int, default=10)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
@@ -115,6 +121,20 @@ def _validate_inputs(
         for branch in plan["branches"]
         if int(branch["worker_shard"]) == args.worker_shard
     ]
+    if args.physical_run:
+        if len(args.physical_run) != len(set(args.physical_run)):
+            raise ValueError("a requested physical run was repeated")
+        available = {str(branch["physical_run"]) for branch in selected}
+        unknown = sorted(set(args.physical_run) - available)
+        if unknown:
+            raise ValueError(
+                f"requested physical runs are absent from this worker: {unknown}"
+            )
+        selected = [
+            branch
+            for branch in selected
+            if str(branch["physical_run"]) in args.physical_run
+        ]
     if not selected:
         raise ValueError("plan has no branches for this worker")
     return selected
