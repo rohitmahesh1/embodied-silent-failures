@@ -195,7 +195,9 @@ def restore_context(
 ) -> tuple[Any, dict[str, Any]]:
     # LIBERO@8f1084e, libero/envs/env_wrapper.py::regenerate_obs_from_state
     # restores a flattened MuJoCo state, forwards simulation, and regenerates
-    # observations. This avoids treating command-prefix replay as exact restore.
+    # observations. reset clears episode bookkeeping left by the prior branch;
+    # the captured MuJoCo state is then restored before any action is executed.
+    env.reset()
     observation = env.regenerate_obs_from_state(captured.simulator_state)
     restored_state = runtime.np.asarray(env.get_sim_state()).copy()
     difference = restored_state.astype(float) - captured.simulator_state.astype(float)
