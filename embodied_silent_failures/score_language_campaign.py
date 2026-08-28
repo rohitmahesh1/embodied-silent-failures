@@ -36,16 +36,18 @@ def _arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _same_monitor(physical: dict, monitor: dict) -> bool:
-    return all(
+def _same_monitor(physical: dict, monitor: dict, score_archive: Path) -> bool:
+    artifact_hashes_match = all(
         physical[physical_name] == monitor[monitor_name]["sha256"]
         for physical_name, monitor_name in (
             ("checkpoint_sha256", "checkpoint"),
             ("configuration_sha256", "configuration"),
             ("split_manifest_sha256", "split_manifest"),
-            ("clean_score_archive_sha256", "scores"),
         )
     )
+    return artifact_hashes_match and physical[
+        "clean_score_archive_sha256"
+    ] == file_sha256(score_archive)
 
 
 def main() -> None:
@@ -64,7 +66,7 @@ def main() -> None:
         raise ValueError("campaign directory is not a language-block campaign")
     monitor, monitor_paths = _validate_monitor(args.monitor_dir)
     physical_json = load_json(args.physical_scores)
-    if not _same_monitor(physical_json["monitor"], monitor):
+    if not _same_monitor(physical_json["monitor"], monitor, monitor_paths["scores"]):
         raise ValueError("ordinary physical scores used a different SAFE monitor")
 
     sys.path.insert(0, str(args.safe_root.resolve()))

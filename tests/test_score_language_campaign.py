@@ -1,4 +1,7 @@
+import hashlib
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -6,6 +9,7 @@ from embodied_silent_failures.language_scoring import (
     composition_check,
     intervention_sources,
 )
+from embodied_silent_failures.score_language_campaign import _same_monitor
 
 
 def local_record(layer_index: int, *, exact: bool) -> dict:
@@ -82,6 +86,27 @@ class LanguageCampaignScoringTests(unittest.TestCase):
         self.assertTrue(valid["score_exact_equal"])
         self.assertFalse(changed_alarm["valid"])
         self.assertFalse(changed_alarm["alarm_timeline_exact_equal"])
+
+    def test_physical_scores_must_use_the_frozen_score_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "clean_scores.npz"
+            archive.write_bytes(b"frozen scores")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            monitor = {
+                "checkpoint": {"sha256": "checkpoint"},
+                "configuration": {"sha256": "configuration"},
+                "split_manifest": {"sha256": "split"},
+            }
+            physical = {
+                "checkpoint_sha256": "checkpoint",
+                "configuration_sha256": "configuration",
+                "split_manifest_sha256": "split",
+                "clean_score_archive_sha256": digest,
+            }
+
+            self.assertTrue(_same_monitor(physical, monitor, archive))
+            physical["clean_score_archive_sha256"] = "different"
+            self.assertFalse(_same_monitor(physical, monitor, archive))
 
 
 if __name__ == "__main__":
