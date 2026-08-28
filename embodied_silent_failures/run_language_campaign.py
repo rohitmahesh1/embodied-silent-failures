@@ -78,6 +78,19 @@ def _select_contexts(
     return selected
 
 
+def _immutable_run_identity(record: dict[str, Any]) -> dict[str, Any]:
+    execution = dict(record.get("execution", {}))
+    execution.pop("started_at", None)
+    return {
+        "campaign": record.get("campaign"),
+        "condition": record.get("condition"),
+        "worker_shard": record.get("worker_shard"),
+        "context_ids": record.get("context_ids"),
+        "limits": record.get("limits"),
+        "execution": execution,
+    }
+
+
 def _execution(args: argparse.Namespace, manifest: dict[str, Any]) -> dict[str, Any]:
     root = Path(__file__).resolve().parents[1]
     return {
@@ -156,11 +169,24 @@ def main() -> None:
         "condition": "activation_fault",
         "worker_shard": args.worker_shard,
         "planned_contexts": len(contexts),
+        "context_ids": [str(context["context_id"]) for context in contexts],
+        "limits": {
+            "maximum_contexts": args.maximum_contexts,
+            "maximum_faulted_terminal_branches": (
+                args.maximum_faulted_terminal_branches
+            ),
+        },
         "execution": execution,
     }
     if run_path.exists() and not args.resume:
         raise FileExistsError(f"language campaign output already exists: {run_path}")
-    if not run_path.exists():
+    if run_path.exists():
+        existing_run = load_json(run_path)
+        if _immutable_run_identity(existing_run) != _immutable_run_identity(run_record):
+            raise ValueError(
+                "resume output belongs to a different language campaign execution"
+            )
+    else:
         write_json_atomic(run_path, run_record)
 
     runtime = load_runtime(args.openvla_root, args.libero_root)
