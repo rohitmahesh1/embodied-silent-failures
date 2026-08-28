@@ -95,6 +95,7 @@ def _run_branch(
     execution: dict[str, Any],
     source_context_sha256: str,
     source_prefix: dict[str, Any],
+    source_capture: dict[str, Any],
 ) -> dict[str, Any]:
     context = branch_plan["context"]
     output_dir = (
@@ -130,6 +131,7 @@ def _run_branch(
         "source_physical_run": branch_plan["physical_run"],
         "source_context_sha256": source_context_sha256,
         "source_prefix": source_prefix,
+        "source_capture": source_capture,
         "archived_clean_command": clean,
         "archived_failed_command": failed,
         "archived_interpolated_command": declared,
@@ -236,11 +238,16 @@ def run_planned_interpolations(
         wait_steps=wait_steps,
         executed_prefix=prefix,
     )
-    if (
-        captured.simulator_state_sha256
-        != archived["captured_simulator_state_sha256"]
-    ):
-        raise ValueError(f"recaptured simulator state changed for {context_id}")
+    source_capture = {
+        "archived_simulator_state_sha256": archived[
+            "captured_simulator_state_sha256"
+        ],
+        "current_simulator_state_sha256": captured.simulator_state_sha256,
+        "exact_equal": (
+            captured.simulator_state_sha256
+            == archived["captured_simulator_state_sha256"]
+        ),
+    }
     clean = policy_decision(
         runtime,
         policy_config,
@@ -251,17 +258,6 @@ def run_planned_interpolations(
         injector=injector,
         action_token_position=int(context["action_token_position"]),
     )
-    archived_clean = runtime.np.asarray(branch_plan["clean_command"], dtype=float)
-    clean_error = float(
-        runtime.np.max(
-            runtime.np.abs(
-                runtime.np.asarray(clean.command, dtype=float) - archived_clean
-            )
-        )
-    )
-    if clean_error > 1e-6:
-        raise ValueError(f"recaptured clean command drifted by {clean_error:.3g}")
-
     return [
         _run_branch(
             output_root=output_root,
@@ -280,6 +276,7 @@ def run_planned_interpolations(
             execution=execution,
             source_context_sha256=file_sha256(archived_path),
             source_prefix=prefix_provenance,
+            source_capture=source_capture,
         )
         for interpolation in branch_plan["lambdas"]
     ]

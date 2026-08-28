@@ -66,6 +66,7 @@ def main() -> None:
                 raise ValueError(f"result is absent from plan: {physical_run}")
             branch = planned[physical_run]
             replay = result["context_replay"]
+            source_capture = fault.get("source_capture")
             records.append(
                 {
                     "physical_run": physical_run,
@@ -85,6 +86,11 @@ def main() -> None:
                     ),
                     "context_replay_state_linf": float(replay["simulator_state_linf"]),
                     "recapture_used_archived_prefix": "source_prefix" in fault,
+                    "source_capture_matches_archive": (
+                        bool(source_capture["exact_equal"])
+                        if source_capture is not None
+                        else True
+                    ),
                     "maximum_archived_clean_command_error": float(
                         fault["maximum_archived_clean_command_error"]
                     ),

@@ -165,9 +165,10 @@ def build_interpolation_plan(
         "schema_version": 1,
         "experiment": "state-blocked command-boundary interpolation canary",
         "purpose": (
-            "Restore one current MuJoCo state per branch, rerun both observed command "
-            "endpoints, and test interior points along the same direction for a local "
-            "task boundary. This canary does not estimate prevalence."
+            "Restore one current MuJoCo state per branch, apply the previously observed "
+            "clean-to-failed command delta around the current clean command, and rerun "
+            "both endpoints plus interior points for a local task boundary. This canary "
+            "does not estimate prevalence."
         ),
         "source": {
             "physical_branches": {
