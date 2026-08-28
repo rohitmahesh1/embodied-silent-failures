@@ -30,6 +30,7 @@ class CommandInterpolationAnalysisTests(unittest.TestCase):
         self.assertEqual(summary["outcome_patterns"], {"SSSFF": 1})
         self.assertEqual(summary["monotone_branches"], 1)
         self.assertEqual(summary["endpoint_contract_branches"], 1)
+        self.assertEqual(summary["valid_boundary_branches"], 1)
         self.assertEqual(
             summary["records"][0]["first_observed_failure_lambda"], 0.75
         )
@@ -53,6 +54,26 @@ class CommandInterpolationAnalysisTests(unittest.TestCase):
         ]
         summary = branch_boundary_summary(records)
         self.assertEqual(summary["monotone_branches"], 0)
+
+    def test_source_recapture_drift_makes_boundary_inconclusive(self) -> None:
+        records = [
+            {
+                "physical_run": "run-a",
+                "context_id": "c001",
+                "worker_shard": 0,
+                "analysis_split": "development",
+                "interpolation": interpolation,
+                "success": success,
+                "source_capture_matches_archive": False,
+                "maximum_archived_clean_command_error": 0.2,
+                "context_replay_state_exact": True,
+            }
+            for interpolation, success in ((0.0, True), (1.0, False))
+        ]
+        summary = branch_boundary_summary(records)
+        self.assertEqual(summary["endpoint_contract_branches"], 1)
+        self.assertEqual(summary["source_context_reproduced_branches"], 0)
+        self.assertEqual(summary["valid_boundary_branches"], 0)
 
 
 if __name__ == "__main__":

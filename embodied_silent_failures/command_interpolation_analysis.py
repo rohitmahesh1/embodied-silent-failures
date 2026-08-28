@@ -26,6 +26,22 @@ def branch_boundary_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             for left in range(len(outcomes))
             for right in range(left + 1, len(outcomes))
         )
+        source_context_reproduced = all(
+            bool(record.get("source_capture_matches_archive", True))
+            and float(record.get("maximum_archived_clean_command_error", 0.0))
+            <= 1e-6
+            for record in ordered
+        )
+        direct_restore_exact = all(
+            bool(record.get("context_replay_state_exact", True))
+            for record in ordered
+        )
+        endpoint_contract = (
+            0.0 in lambdas
+            and 1.0 in lambdas
+            and outcomes[lambdas.index(0.0)]
+            and not outcomes[lambdas.index(1.0)]
+        )
         branches.append(
             {
                 "physical_run": physical_run,
@@ -36,11 +52,19 @@ def branch_boundary_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                 "successes": outcomes,
                 "first_observed_failure_lambda": first_failure,
                 "monotone_success_to_failure": monotone,
-                "endpoint_contract_holds": (
-                    0.0 in lambdas
-                    and 1.0 in lambdas
-                    and outcomes[lambdas.index(0.0)]
-                    and not outcomes[lambdas.index(1.0)]
+                "source_context_reproduced": source_context_reproduced,
+                "maximum_archived_clean_command_error": max(
+                    float(
+                        record.get("maximum_archived_clean_command_error", 0.0)
+                    )
+                    for record in ordered
+                ),
+                "direct_restore_exact": direct_restore_exact,
+                "endpoint_contract_holds": endpoint_contract,
+                "valid_boundary_branch": (
+                    source_context_reproduced
+                    and direct_restore_exact
+                    and endpoint_contract
                 ),
             }
         )
@@ -55,6 +79,15 @@ def branch_boundary_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "endpoint_contract_branches": sum(
             branch["endpoint_contract_holds"] for branch in branches
+        ),
+        "source_context_reproduced_branches": sum(
+            branch["source_context_reproduced"] for branch in branches
+        ),
+        "exact_direct_restore_branches": sum(
+            branch["direct_restore_exact"] for branch in branches
+        ),
+        "valid_boundary_branches": sum(
+            branch["valid_boundary_branch"] for branch in branches
         ),
         "outcome_patterns": dict(sorted(patterns.items())),
         "records": branches,
