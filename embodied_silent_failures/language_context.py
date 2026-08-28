@@ -188,6 +188,31 @@ def replay_context(
     }
 
 
+def restore_context(
+    runtime: Runtime,
+    env: Any,
+    captured: CapturedContext,
+) -> tuple[Any, dict[str, Any]]:
+    # LIBERO@8f1084e, libero/envs/env_wrapper.py::regenerate_obs_from_state
+    # restores a flattened MuJoCo state, forwards simulation, and regenerates
+    # observations. This avoids treating command-prefix replay as exact restore.
+    observation = env.regenerate_obs_from_state(captured.simulator_state)
+    restored_state = runtime.np.asarray(env.get_sim_state()).copy()
+    difference = restored_state.astype(float) - captured.simulator_state.astype(float)
+    return observation, {
+        "method": "restore the captured flattened MuJoCo state directly",
+        "simulator_state_sha256": array_sha256(runtime, restored_state),
+        "simulator_state_exact_equal": bool(
+            runtime.np.array_equal(restored_state, captured.simulator_state)
+        ),
+        "simulator_state_l2": float(runtime.np.linalg.norm(difference)),
+        "simulator_state_linf": float(runtime.np.max(runtime.np.abs(difference))),
+        "observation": _observation_drift(
+            runtime.np, captured.observation, observation
+        ),
+    }
+
+
 def run_terminal_branch(
     runtime: Runtime,
     policy_config: Any,
@@ -201,10 +226,14 @@ def run_terminal_branch(
     target_decision: PolicyDecision,
     *,
     wait_steps: int,
+    restore_directly: bool = False,
 ) -> dict[str, Any]:
-    observation, replay = replay_context(
-        runtime, env, initial_state, captured, wait_steps=wait_steps
-    )
+    if restore_directly:
+        observation, replay = restore_context(runtime, env, captured)
+    else:
+        observation, replay = replay_context(
+            runtime, env, initial_state, captured, wait_steps=wait_steps
+        )
     rows = [dict(row) for row in captured.prefix_rows]
     hidden_states = list(captured.prefix_hidden_states)
     policy_step = int(context["policy_step"])

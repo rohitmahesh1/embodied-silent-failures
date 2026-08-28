@@ -6,7 +6,7 @@ from pathlib import Path
 
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.command_interpolation import (
-    INTERIOR_LAMBDAS,
+    BOUNDARY_LAMBDAS,
     build_interpolation_plan,
 )
 
@@ -31,7 +31,7 @@ def main() -> None:
         args.campaign_manifest,
         seed=args.seed,
         branches_per_stratum=args.branches_per_stratum,
-        lambdas=tuple(args.lambdas or INTERIOR_LAMBDAS),
+        lambdas=tuple(args.lambdas or BOUNDARY_LAMBDAS),
     )
     write_json_atomic(args.output, plan)
     print(

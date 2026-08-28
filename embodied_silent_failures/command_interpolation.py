@@ -15,7 +15,7 @@ from embodied_silent_failures.language_gates import COMMAND_COMPONENTS
 from embodied_silent_failures.provenance import file_sha256, load_json
 
 
-INTERIOR_LAMBDAS = (0.25, 0.5, 0.75)
+BOUNDARY_LAMBDAS = (0.0, 0.25, 0.5, 0.75, 1.0)
 SPLITS = ("development", "holdout")
 
 
@@ -69,14 +69,14 @@ def build_interpolation_plan(
     *,
     seed: int,
     branches_per_stratum: int,
-    lambdas: tuple[float, ...] = INTERIOR_LAMBDAS,
+    lambdas: tuple[float, ...] = BOUNDARY_LAMBDAS,
 ) -> dict[str, Any]:
     if branches_per_stratum <= 0:
         raise ValueError("branches per stratum must be positive")
     if not lambdas or len(lambdas) != len(set(lambdas)):
         raise ValueError("interpolation lambdas must be nonempty and unique")
-    if any(not math.isfinite(value) or not 0 < value < 1 for value in lambdas):
-        raise ValueError("interpolation lambdas must be finite and strictly interior")
+    if any(not math.isfinite(value) or not 0 <= value <= 1 for value in lambdas):
+        raise ValueError("interpolation lambdas must be finite and between zero and one")
 
     manifest = load_json(campaign_manifest_path)
     validate_language_campaign_manifest(manifest)
@@ -165,9 +165,9 @@ def build_interpolation_plan(
         "schema_version": 1,
         "experiment": "state-blocked command-boundary interpolation canary",
         "purpose": (
-            "Check whether interior points along observed clean-to-failed command "
-            "directions can be replayed reproducibly and reveal a local task boundary. "
-            "This canary does not estimate prevalence."
+            "Restore one current MuJoCo state per branch, rerun both observed command "
+            "endpoints, and test interior points along the same direction for a local "
+            "task boundary. This canary does not estimate prevalence."
         ),
         "source": {
             "physical_branches": {
@@ -209,8 +209,8 @@ def interpolate_command(
         raise ValueError("command interpolation requires seven-dimensional endpoints")
     if clean[-1] != failed[-1]:
         raise ValueError("gripper interpolation is categorical and is not supported")
-    if not 0 < interpolation < 1:
-        raise ValueError("command interpolation must be strictly interior")
+    if not 0 <= interpolation <= 1:
+        raise ValueError("command interpolation must be between zero and one")
     result = [
         reference + interpolation * (target - reference)
         for reference, target in zip(clean, failed, strict=True)

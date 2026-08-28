@@ -156,6 +156,7 @@ def _run_branch(
                 captured,
                 target,
                 wait_steps=wait_steps,
+                restore_directly=True,
             )
             return write_terminal_branch(
                 output_dir,

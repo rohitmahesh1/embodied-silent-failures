@@ -18,6 +18,12 @@ class CommandInterpolationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "categorical"):
             interpolate_command([0.0] * 6 + [-1.0], [0.0] * 6 + [1.0], 0.5)
 
+    def test_interpolation_includes_observed_endpoints(self) -> None:
+        clean = [0.0] * 6 + [1.0]
+        failed = [1.0] * 6 + [1.0]
+        self.assertEqual(interpolate_command(clean, failed, 0.0), clean)
+        self.assertEqual(interpolate_command(clean, failed, 1.0), failed)
+
 
 if __name__ == "__main__":
     unittest.main()
