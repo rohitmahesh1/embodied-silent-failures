@@ -21,6 +21,7 @@ from embodied_silent_failures.language_policy import (
     intervention_record,
     policy_decision,
 )
+from embodied_silent_failures.openvla_runtime import array_sha256
 from embodied_silent_failures.provenance import load_json
 
 
@@ -37,6 +38,52 @@ def error_record(reason: str, error: Exception, **extra: Any) -> dict[str, Any]:
         "traceback": traceback.format_exc(limit=16),
         "updated_at": now(),
         **extra,
+    }
+
+
+def _command_groups(runtime: Any, candidates: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    # SAFE OpenVLA 300dce26, modeling_prismatic.py::predict_action, returns the
+    # action consumed once by language_context.py::run_terminal_branch. Later
+    # decisions are unmodified, so exact executed-command identity defines the
+    # shared physical suffix; each member's distinct SAFE feature is kept.
+    groups: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        layer_index, decision, local_record = candidate
+        command_id = array_sha256(runtime, decision.command)
+        group = groups.setdefault(
+            command_id,
+            {
+                "command_id": command_id,
+                "executed_command": decision.command.tolist(),
+                "members": [],
+            },
+        )
+        group["members"].append((layer_index, decision, local_record))
+    return list(groups.values())
+
+
+def _select_terminal_groups(
+    groups: list[dict[str, Any]],
+    control_result: dict[str, Any],
+    maximum_branches: int | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    if control_result.get("status") != "complete":
+        return [], "control_unresolved"
+    if control_result.get("success") is not True:
+        return [], "control_failed"
+    if maximum_branches is None:
+        return groups, None
+    return groups[:maximum_branches], None
+
+
+def _group_record(group: dict[str, Any]) -> dict[str, Any]:
+    members = group["members"]
+    return {
+        "command_id": group["command_id"],
+        "executed_command": group["executed_command"],
+        "representative_layer_index": int(members[0][0]),
+        "member_layer_indices": [int(member[0]) for member in members],
+        "member_site_ids": [str(member[2]["site_id"]) for member in members],
     }
 
 
@@ -275,10 +322,15 @@ def run_context(
     )
     branch_results.append({"branch": "control", "result": control_result})
 
-    selected_candidates = candidates
-    if maximum_faulted_terminal_branches is not None:
-        selected_candidates = candidates[:maximum_faulted_terminal_branches]
-    for layer_index, decision, local_record in selected_candidates:
+    command_groups = _command_groups(runtime, candidates)
+    selected_groups, terminal_skip_reason = _select_terminal_groups(
+        command_groups,
+        control_result,
+        maximum_faulted_terminal_branches,
+    )
+    for group in selected_groups:
+        layer_index, decision, local_record = group["members"][0]
+        group_record = _group_record(group)
         fault = {
             "kind": "language_block_temporal_replacement",
             "operator": "replace final action-token vector at t with its value at t-1",
@@ -287,12 +339,13 @@ def run_context(
             "action_token_position": token_position,
             "layer_index": layer_index,
             "site_id": local_record["site_id"],
+            "command_group": group_record,
             "local_measurements": local_record,
         }
         result = _run_branch(
             output_dir=output_dir
             / "attempts"
-            / f"{context['context_id']}-layer{layer_index:02d}",
+            / f"{context['context_id']}-command-{group['command_id'][:12]}",
             runtime=runtime,
             policy_config=policy_config,
             model=model,
@@ -308,7 +361,27 @@ def run_context(
             condition="activation_fault",
             wait_steps=wait_steps,
         )
-        branch_results.append({"branch": f"layer{layer_index:02d}", "result": result})
+        branch_results.append(
+            {
+                "branch": f"command-{group['command_id'][:12]}",
+                "command_group": group_record,
+                "result": result,
+            }
+        )
+
+    selected_interventions = sum(
+        len(group["members"]) for group in selected_groups
+    )
+    deferred_groups = (
+        len(command_groups) - len(selected_groups)
+        if terminal_skip_reason is None
+        else 0
+    )
+    deferred_interventions = (
+        len(candidates) - selected_interventions
+        if terminal_skip_reason is None
+        else 0
+    )
 
     summary = {
         "schema_version": 1,
@@ -317,9 +390,19 @@ def run_context(
         "local_interventions": len(local_records),
         "local_errors": sum(record.get("status") == "error" for record in local_records),
         "command_changing_interventions": len(candidates),
-        "faulted_terminal_branches_run": len(selected_candidates),
-        "faulted_terminal_branches_deferred_by_limit": len(candidates)
-        - len(selected_candidates),
+        "unique_faulted_commands": len(command_groups),
+        "command_groups": [_group_record(group) for group in command_groups],
+        "faulted_terminal_branches_run": len(selected_groups),
+        "faulted_terminal_interventions_represented": selected_interventions,
+        "faulted_terminal_branches_deferred_by_limit": deferred_groups,
+        "faulted_terminal_interventions_deferred_by_limit": deferred_interventions,
+        "faulted_terminal_skip_reason": terminal_skip_reason,
+        "faulted_terminal_branches_skipped_by_control": (
+            len(command_groups) if terminal_skip_reason is not None else 0
+        ),
+        "faulted_terminal_interventions_skipped_by_control": (
+            len(candidates) if terminal_skip_reason is not None else 0
+        ),
         "terminal_unresolved": sum(
             item["result"].get("status") == "unresolved" for item in branch_results
         ),
