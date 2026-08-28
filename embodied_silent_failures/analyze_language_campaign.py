@@ -126,6 +126,7 @@ def analysis_row(record: dict[str, Any], primary_alpha: str) -> dict[str, Any]:
         "task_id": int(context["task_id"]),
         "episode_index": int(context["episode_index"]),
         "phase": context["phase"],
+        "worker_shard": int(context["worker_shard"]),
         "policy_step": int(context["policy_step"]),
         "action_token_position": int(context["action_token_position"]),
         "layer_index": int(record["layer_index"]),
@@ -272,7 +273,13 @@ def main() -> None:
     rows = [analysis_row(record, primary_alpha) for record in selected_records]
 
     groups = {}
-    for field in ("phase", "action_token_position", "layer_index", "task_id"):
+    for field in (
+        "worker_shard",
+        "phase",
+        "action_token_position",
+        "layer_index",
+        "task_id",
+    ):
         groups[field] = {
             name: group_summary(values, samples=0, seed=args.seed)
             for name, values in sorted(_group_rows(rows, field).items())
