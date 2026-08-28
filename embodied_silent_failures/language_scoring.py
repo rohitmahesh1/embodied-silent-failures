@@ -211,6 +211,23 @@ def composition_check(
     }
 
 
+def composition_verified(
+    record: dict[str, Any],
+    checks_by_group: dict[tuple[str, str], dict[str, Any]],
+    *,
+    control_feature_exact: bool,
+) -> bool:
+    if not control_feature_exact:
+        return False
+    command_id = record.get("command_id")
+    if command_id is None:
+        return True
+    if record.get("terminal_evidence") != "observed_exact_command_branch":
+        return False
+    check = checks_by_group.get((str(record["context_id"]), str(command_id)))
+    return bool(check and check["valid"])
+
+
 def score_context(
     *,
     campaign_dir: Path,
@@ -345,7 +362,10 @@ def score_context(
         )
         score_arrays[record_id] = values
         command_id = base["command_id"]
-        if command_id is not None and layer_index == base["representative_layer_index"]:
+        if (
+            base["terminal_evidence"] == "observed_exact_command_branch"
+            and layer_index == base["representative_layer_index"]
+        ):
             branch = next(
                 item
                 for item in summary["branches"]
@@ -379,14 +399,16 @@ def score_context(
             checks.append(check)
         records.append(base)
 
-    invalid_groups = {
-        (value["context_id"], value["command_id"])
+    checks_by_group = {
+        (str(value["context_id"]), str(value["command_id"])): value
         for value in checks
-        if not value["valid"]
     }
     for record in records:
-        key = (record.get("context_id"), record.get("command_id"))
-        verified = control_feature_exact and key not in invalid_groups
+        verified = composition_verified(
+            record,
+            checks_by_group,
+            control_feature_exact=control_feature_exact,
+        )
         record["composition_verified"] = verified
         if not verified and record.get("status") == "scored":
             record["status"] = "composition_unverified"

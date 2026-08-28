@@ -7,6 +7,7 @@ import numpy as np
 
 from embodied_silent_failures.language_scoring import (
     composition_check,
+    composition_verified,
     intervention_sources,
 )
 from embodied_silent_failures.score_language_campaign import _same_monitor
@@ -86,6 +87,34 @@ class LanguageCampaignScoringTests(unittest.TestCase):
         self.assertTrue(valid["score_exact_equal"])
         self.assertFalse(changed_alarm["valid"])
         self.assertFalse(changed_alarm["alarm_timeline_exact_equal"])
+
+    def test_unexecuted_command_group_is_not_composition_verified(self) -> None:
+        record = {
+            "context_id": "c000",
+            "command_id": "changed",
+            "terminal_evidence": "unavailable_without_successful_control",
+        }
+
+        self.assertFalse(
+            composition_verified(record, {}, control_feature_exact=True)
+        )
+
+    def test_executed_command_group_requires_a_valid_representative(self) -> None:
+        record = {
+            "context_id": "c002",
+            "command_id": "changed",
+            "terminal_evidence": "observed_exact_command_branch",
+        }
+        key = ("c002", "changed")
+
+        self.assertFalse(
+            composition_verified(record, {}, control_feature_exact=True)
+        )
+        self.assertTrue(
+            composition_verified(
+                record, {key: {"valid": True}}, control_feature_exact=True
+            )
+        )
 
     def test_physical_scores_must_use_the_frozen_score_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
