@@ -36,6 +36,7 @@ class RunLanguageCampaignTests(unittest.TestCase):
             "worker_shard": 0,
             "context_ids": ["c000"],
             "limits": {"maximum_contexts": None},
+            "branch_state_restoration": "direct",
             "execution": {"started_at": "first", "manifest_file_sha256": "abc"},
         }
         resumed = {
@@ -52,6 +53,7 @@ class RunLanguageCampaignTests(unittest.TestCase):
             "worker_shard": 0,
             "context_ids": ["c000"],
             "limits": {},
+            "branch_state_restoration": "direct",
             "execution": {"manifest_file_sha256": "abc"},
         }
 
@@ -65,6 +67,11 @@ class RunLanguageCampaignTests(unittest.TestCase):
         )
         self.assertNotEqual(
             _immutable_run_identity(run), _immutable_run_identity(changed_manifest)
+        )
+
+        changed_restoration = {**run, "branch_state_restoration": "prefix-replay"}
+        self.assertNotEqual(
+            _immutable_run_identity(run), _immutable_run_identity(changed_restoration)
         )
 
 

@@ -50,6 +50,15 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--wait-steps", type=int, default=10)
     parser.add_argument("--maximum-contexts", type=int)
     parser.add_argument("--maximum-faulted-terminal-branches", type=int)
+    parser.add_argument(
+        "--branch-state-restoration",
+        choices=("prefix-replay", "direct"),
+        default="prefix-replay",
+        help=(
+            "Reconstruct each terminal branch by replaying the captured prefix, "
+            "or reset and directly restore the one captured MuJoCo state."
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -87,6 +96,7 @@ def _immutable_run_identity(record: dict[str, Any]) -> dict[str, Any]:
         "worker_shard": record.get("worker_shard"),
         "context_ids": record.get("context_ids"),
         "limits": record.get("limits"),
+        "branch_state_restoration": record.get("branch_state_restoration"),
         "execution": execution,
     }
 
@@ -176,6 +186,7 @@ def main() -> None:
                 args.maximum_faulted_terminal_branches
             ),
         },
+        "branch_state_restoration": args.branch_state_restoration,
         "execution": execution,
     }
     if run_path.exists() and not args.resume:
@@ -234,6 +245,7 @@ def main() -> None:
                         maximum_faulted_terminal_branches=(
                             args.maximum_faulted_terminal_branches
                         ),
+                        branch_state_restoration=args.branch_state_restoration,
                         context=context,
                         sites=sites,
                         runtime=runtime,

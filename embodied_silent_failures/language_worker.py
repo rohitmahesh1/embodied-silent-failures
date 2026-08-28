@@ -104,6 +104,7 @@ def _run_branch(
     execution: dict[str, Any],
     condition: str,
     wait_steps: int,
+    restore_directly: bool,
 ) -> dict[str, Any]:
     completion = output_dir / (
         f"task{context['task_id']}--ep{context['episode_index']}.complete.json"
@@ -126,6 +127,7 @@ def _run_branch(
                 captured,
                 decision,
                 wait_steps=wait_steps,
+                restore_directly=restore_directly,
             )
             result = write_terminal_branch(
                 output_dir,
@@ -164,6 +166,7 @@ def run_context(
     output_dir: Path,
     wait_steps: int,
     maximum_faulted_terminal_branches: int | None,
+    branch_state_restoration: str,
     context: dict[str, Any],
     sites: dict[tuple[int, int], dict[str, Any]],
     runtime: Any,
@@ -176,6 +179,11 @@ def run_context(
     initial_state: Any,
     execution: dict[str, Any],
 ) -> dict[str, Any]:
+    if branch_state_restoration not in {"prefix-replay", "direct"}:
+        raise ValueError(
+            f"unknown branch state restoration: {branch_state_restoration}"
+        )
+    restore_directly = branch_state_restoration == "direct"
     context_dir = output_dir / "contexts" / str(context["context_id"])
     context_dir.mkdir(parents=True, exist_ok=True)
     complete_path = context_dir / "context.complete.json"
@@ -302,6 +310,7 @@ def run_context(
         "policy_step": int(context["policy_step"]),
         "source_policy_step": int(context["source_policy_step"]),
         "action_token_position": token_position,
+        "branch_state_restoration": branch_state_restoration,
     }
     control_result = _run_branch(
         output_dir=output_dir / "attempts" / f"{context['context_id']}-control",
@@ -319,6 +328,7 @@ def run_context(
         execution=execution,
         condition="activation_control",
         wait_steps=wait_steps,
+        restore_directly=restore_directly,
     )
     branch_results.append({"branch": "control", "result": control_result})
 
@@ -341,6 +351,7 @@ def run_context(
             "site_id": local_record["site_id"],
             "command_group": group_record,
             "local_measurements": local_record,
+            "branch_state_restoration": branch_state_restoration,
         }
         result = _run_branch(
             output_dir=output_dir
@@ -360,6 +371,7 @@ def run_context(
             execution=execution,
             condition="activation_fault",
             wait_steps=wait_steps,
+            restore_directly=restore_directly,
         )
         branch_results.append(
             {
@@ -387,6 +399,7 @@ def run_context(
         "schema_version": 1,
         "status": "complete",
         "context": context,
+        "branch_state_restoration": branch_state_restoration,
         "local_interventions": len(local_records),
         "local_errors": sum(record.get("status") == "error" for record in local_records),
         "command_changing_interventions": len(candidates),
