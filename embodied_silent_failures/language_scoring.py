@@ -9,7 +9,8 @@ from embodied_silent_failures.provenance import file_sha256, load_json
 from embodied_silent_failures.score_safe import alarm_windows
 
 
-SCORE_TOLERANCE = 1e-6
+SCORE_ABSOLUTE_TOLERANCE = 1e-6
+SCORE_RELATIVE_TOLERANCE = 1e-6
 
 
 def intervention_sources(
@@ -194,7 +195,14 @@ def composition_check(
     difference = np.abs(reconstructed - physical)
     maximum = float(np.max(difference[finite])) if np.any(finite) else None
     exact = bool(np.array_equal(reconstructed, physical, equal_nan=True))
-    close = bool(np.allclose(reconstructed, physical, rtol=0, atol=SCORE_TOLERANCE))
+    close = bool(
+        np.allclose(
+            reconstructed,
+            physical,
+            rtol=SCORE_RELATIVE_TOLERANCE,
+            atol=SCORE_ABSOLUTE_TOLERANCE,
+        )
+    )
     alarm_equal = bool(
         np.array_equal(
             reconstructed >= band[: len(reconstructed)],
@@ -207,7 +215,8 @@ def composition_check(
         "score_exact_equal": exact,
         "maximum_score_difference": maximum,
         "alarm_timeline_exact_equal": alarm_equal,
-        "absolute_tolerance": SCORE_TOLERANCE,
+        "absolute_tolerance": SCORE_ABSOLUTE_TOLERANCE,
+        "relative_tolerance": SCORE_RELATIVE_TOLERANCE,
     }
 
 

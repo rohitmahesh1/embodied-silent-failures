@@ -88,6 +88,19 @@ class LanguageCampaignScoringTests(unittest.TestCase):
         self.assertFalse(changed_alarm["valid"])
         self.assertFalse(changed_alarm["alarm_timeline_exact_equal"])
 
+    def test_composition_allows_float32_scale_relative_roundoff(self) -> None:
+        band = np.asarray([200.0], dtype=np.float32)
+        physical = np.asarray([100.0], dtype=np.float32)
+        reconstructed = np.asarray([100.00005], dtype=np.float32)
+
+        check = composition_check(reconstructed, physical, band, np)
+
+        self.assertTrue(check["valid"])
+        self.assertFalse(check["score_exact_equal"])
+        self.assertTrue(check["alarm_timeline_exact_equal"])
+        self.assertEqual(check["absolute_tolerance"], 1e-6)
+        self.assertEqual(check["relative_tolerance"], 1e-6)
+
     def test_unexecuted_command_group_is_not_composition_verified(self) -> None:
         record = {
             "context_id": "c000",
