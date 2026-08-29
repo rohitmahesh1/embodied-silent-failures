@@ -105,6 +105,22 @@ def _state_gate(
     holdout_predictions["previous_command_magnitude"] = model_probabilities(
         magnitude_model, holdout
     )
+
+    def ablation_difference(
+        predictions: dict[str, list[float]], neighbors: int
+    ) -> dict[str, Any]:
+        command = predictions[f"executed_command_k{neighbors}"]
+        state_command = predictions[f"state_and_executed_command_k{neighbors}"]
+        differences = [
+            abs(left - right)
+            for left, right in zip(command, state_command, strict=True)
+        ]
+        return {
+            "rows": len(differences),
+            "changed_predictions": sum(value > 0 for value in differences),
+            "maximum_absolute_change": max(differences),
+        }
+
     return (
         {
             "development_leave_trajectory_out": {
@@ -115,6 +131,20 @@ def _state_gate(
             "holdout": {
                 name: binary_metrics(holdout, "task_failure", values)
                 for name, values in holdout_predictions.items()
+            },
+            "raw_state_ablation": {
+                "development_leave_trajectory_out": {
+                    f"k{neighbors}": ablation_difference(
+                        development_predictions, neighbors
+                    )
+                    for neighbors in NEIGHBOR_COUNTS
+                },
+                "holdout": {
+                    f"k{neighbors}": ablation_difference(
+                        holdout_predictions, neighbors
+                    )
+                    for neighbors in NEIGHBOR_COUNTS
+                },
             },
             "holdout_trajectory_cluster_bootstrap": clustered_bootstrap(
                 holdout,
@@ -400,4 +430,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
