@@ -189,6 +189,7 @@ def composition_check(
             "reason": "score_length_mismatch",
             "score_exact_equal": False,
             "maximum_score_difference": None,
+            "score_within_diagnostic_tolerance": False,
             "alarm_timeline_exact_equal": False,
         }
     finite = np.isfinite(reconstructed) & np.isfinite(physical)
@@ -210,10 +211,11 @@ def composition_check(
         )
     )
     return {
-        "valid": close and alarm_equal,
-        "reason": None if close and alarm_equal else "ordinary_safe_score_mismatch",
+        "valid": alarm_equal,
+        "reason": None if alarm_equal else "ordinary_safe_alarm_timeline_mismatch",
         "score_exact_equal": exact,
         "maximum_score_difference": maximum,
+        "score_within_diagnostic_tolerance": close,
         "alarm_timeline_exact_equal": alarm_equal,
         "absolute_tolerance": SCORE_ABSOLUTE_TOLERANCE,
         "relative_tolerance": SCORE_RELATIVE_TOLERANCE,

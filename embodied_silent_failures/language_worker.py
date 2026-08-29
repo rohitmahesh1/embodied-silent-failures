@@ -14,6 +14,7 @@ from embodied_silent_failures.artifacts import (
 from embodied_silent_failures.language_context import (
     capture_context,
     run_terminal_branch,
+    write_captured_context_archive,
     write_terminal_branch,
 )
 from embodied_silent_failures.language_fault import LanguageBlockInjector
@@ -203,6 +204,12 @@ def run_context(
         context,
         wait_steps=wait_steps,
     )
+    captured_context_path = context_dir / "captured_context.npz"
+    captured_context_archive = write_captured_context_archive(
+        captured_context_path,
+        runtime,
+        captured,
+    )
     token_position = int(context["action_token_position"])
     clean = policy_decision(
         runtime,
@@ -293,6 +300,7 @@ def run_context(
             "status": "complete",
             "context": context,
             "captured_simulator_state_sha256": captured.simulator_state_sha256,
+            "captured_context_archive": captured_context_archive,
             "source_hook_calls": captured.source_trace.call_counts,
             "source_hook_anomalies": list(captured.source_trace.anomalies),
             "clean_hook_calls": clean.trace.call_counts,

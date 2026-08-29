@@ -72,6 +72,21 @@ def write_pickle_atomic(path: Path, value: Any) -> None:
         pending.unlink(missing_ok=True)
 
 
+def write_npz_atomic(path: Path, np: Any, arrays: dict[str, Any]) -> None:
+    if not arrays:
+        raise ValueError("cannot write an empty NumPy archive")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = temporary_path(path)
+    try:
+        with pending.open("wb") as file:
+            np.savez_compressed(file, **arrays)
+            file.flush()
+            os.fsync(file.fileno())
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def artifact_record(path: Path) -> dict[str, Any]:
     digest = hashlib.sha256()
     with path.open("rb") as file:

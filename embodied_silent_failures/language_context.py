@@ -10,6 +10,7 @@ from embodied_silent_failures.artifacts import (
     safe_stem,
     write_csv_atomic,
     write_json_atomic,
+    write_npz_atomic,
     write_pickle_atomic,
 )
 from embodied_silent_failures.language_fault import (
@@ -35,6 +36,47 @@ class CapturedContext:
     prefix_hidden_states: tuple[Any, ...]
     prefix_rows: tuple[dict[str, Any], ...]
     source_trace: LanguageInferenceTrace
+
+
+def write_captured_context_archive(
+    path: Path,
+    runtime: Runtime,
+    captured: CapturedContext,
+) -> dict[str, Any]:
+    # language_context.py::capture_context copies env.get_sim_state() and the
+    # policy observation immediately before intervention. Preserve those raw
+    # arrays without assigning model- or task-specific semantic groups.
+    arrays = {"simulator_state": runtime.np.asarray(captured.simulator_state)}
+    observations = []
+    for index, name in enumerate(sorted(captured.observation)):
+        archive_key = f"observation_{index:04d}"
+        value = runtime.np.asarray(captured.observation[name])
+        if value.dtype.hasobject:
+            raise TypeError(f"cannot archive object-valued observation {name!r}")
+        arrays[archive_key] = value
+        observations.append(
+            {
+                "name": str(name),
+                "archive_key": archive_key,
+                "shape": list(value.shape),
+                "dtype": value.dtype.str,
+                "sha256": array_sha256(runtime, value),
+            }
+        )
+    write_npz_atomic(path, runtime.np, arrays)
+    state = runtime.np.asarray(captured.simulator_state)
+    return {
+        "schema_version": 1,
+        "format": "compressed NumPy archive readable with allow_pickle=False",
+        "artifact": artifact_record(path),
+        "simulator_state": {
+            "archive_key": "simulator_state",
+            "shape": list(state.shape),
+            "dtype": state.dtype.str,
+            "sha256": captured.simulator_state_sha256,
+        },
+        "observations": observations,
+    }
 
 
 def _action_row(policy_step: int, command: Any, decision: PolicyDecision) -> dict[str, Any]:

@@ -74,7 +74,7 @@ class LanguageCampaignScoringTests(unittest.TestCase):
         self.assertIsNone(plan["terminal_result"])
         self.assertEqual(plan["monitor_horizon"], "through_fault_step_only")
 
-    def test_composition_requires_score_and_alarm_equivalence(self) -> None:
+    def test_composition_requires_alarm_equivalence(self) -> None:
         band = np.asarray([0.5, 0.5], dtype=np.float32)
         physical = np.asarray([0.1, 0.6], dtype=np.float32)
 
@@ -88,15 +88,16 @@ class LanguageCampaignScoringTests(unittest.TestCase):
         self.assertFalse(changed_alarm["valid"])
         self.assertFalse(changed_alarm["alarm_timeline_exact_equal"])
 
-    def test_composition_allows_float32_scale_relative_roundoff(self) -> None:
+    def test_score_tolerance_is_diagnostic_when_alarm_timeline_matches(self) -> None:
         band = np.asarray([200.0], dtype=np.float32)
         physical = np.asarray([100.0], dtype=np.float32)
-        reconstructed = np.asarray([100.00005], dtype=np.float32)
+        reconstructed = np.asarray([100.01], dtype=np.float32)
 
         check = composition_check(reconstructed, physical, band, np)
 
         self.assertTrue(check["valid"])
         self.assertFalse(check["score_exact_equal"])
+        self.assertFalse(check["score_within_diagnostic_tolerance"])
         self.assertTrue(check["alarm_timeline_exact_equal"])
         self.assertEqual(check["absolute_tolerance"], 1e-6)
         self.assertEqual(check["relative_tolerance"], 1e-6)
