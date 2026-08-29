@@ -6,6 +6,8 @@ from pathlib import Path
 
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.language_campaign import (
+    CACHE_AWARE_BOUNDARY_STATE,
+    CACHE_REPLAY_STORAGE,
     build_language_campaign_manifest,
     validate_language_campaign_manifest,
 )
@@ -52,11 +54,13 @@ def main() -> None:
                 "full_language_interfaces": True,
                 "language_ports": [
                     "post-block final-token residual",
-                    "pre-rotary attention key projection",
-                    "attention value projection",
+                    "exact post-rotary current-token key cache entry",
+                    "exact current-token value cache entry",
                     "complete 256-entry action-token logits",
                 ],
                 "boundary_replays": ["immediate", "final"],
+                "boundary_state": CACHE_AWARE_BOUNDARY_STATE,
+                "boundary_replay_storage": CACHE_REPLAY_STORAGE,
                 "terminal_trajectory": (
                     "exact simulator state, every stable numeric observation, "
                     "and action-side policy evidence from intervention through "

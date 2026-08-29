@@ -17,6 +17,18 @@ LANGUAGE_BLOCK_COUNT = 32
 TRAJECTORIES_PER_TASK = 5
 DEVELOPMENT_TRAJECTORIES_PER_TASK = 3
 _BLOCK_PATH = re.compile(r"^policy\.language_model\.model\.layers\.(\d+)$")
+CACHE_AWARE_BOUNDARY_STATE = (
+    "post-block residual plus exact differential key/value cache entries "
+    "from the fault output through the replay boundary"
+)
+CACHE_REPLAY_STORAGE = (
+    "lossless sparse overrides relative to the corresponding archived fault trace; "
+    "an absent replay row is bitwise identical"
+)
+EXACT_CACHE_PORTS = {
+    "exact post-rotary current-token key cache entry",
+    "exact current-token value cache entry",
+}
 
 
 def language_block_sites(table: dict[str, Any]) -> list[dict[str, Any]]:
@@ -435,3 +447,18 @@ def validate_language_campaign_manifest(manifest: dict[str, Any]) -> None:
     prior_paths = manifest.get("excluded_prior_manifests", [])
     if manifest.get("schema_version") == 2 and not isinstance(prior_paths, list):
         raise ValueError("prior manifest provenance must be a list")
+    instrumentation = manifest.get("instrumentation", {})
+    if instrumentation.get("full_language_interfaces"):
+        ports = set(instrumentation.get("language_ports", []))
+        if not EXACT_CACHE_PORTS <= ports:
+            raise ValueError(
+                "full-interface campaign does not capture both exact cache entries"
+            )
+        if instrumentation.get("boundary_state") != CACHE_AWARE_BOUNDARY_STATE:
+            raise ValueError(
+                "full-interface campaign does not declare cache-aware boundary replay"
+            )
+        if instrumentation.get("boundary_replay_storage") != CACHE_REPLAY_STORAGE:
+            raise ValueError(
+                "full-interface campaign does not declare lossless replay storage"
+            )

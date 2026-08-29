@@ -87,6 +87,8 @@ def policy_decision(
     action_token_position: int | None = None,
     replacement_layer: int | None = None,
     sources: dict[int, Any] | None = None,
+    cache_replacement_layers: frozenset[int] | None = None,
+    cache_sources: dict[int, dict[str, Any]] | None = None,
 ) -> PolicyDecision:
     resize_size = runtime.get_image_resize_size(policy_config)
     image = runtime.get_libero_image(observation, resize_size)
@@ -105,6 +107,8 @@ def policy_decision(
             int(action_token_position),
             replacement_layer=replacement_layer,
             sources=sources,
+            cache_replacement_layers=cache_replacement_layers,
+            cache_sources=cache_sources,
         )
         if injector is not None
         else nullcontext()
@@ -160,6 +164,53 @@ def array_change(np: Any, reference: Any, value: Any) -> dict[str, Any]:
     }
 
 
+def _cache_precondition(
+    runtime: Runtime,
+    clean: LanguageInferenceTrace,
+    faulted: LanguageInferenceTrace,
+    *,
+    layer_index: int,
+    token_position: int,
+) -> dict[str, Any]:
+    coordinates = [
+        (layer, token)
+        for token in range(token_position)
+        for layer in range(32)
+    ]
+    coordinates.extend(
+        (layer, token_position) for layer in range(layer_index + 1)
+    )
+    result = {}
+    for kind in ("key", "value"):
+        first_difference = None
+        exact_coordinates = 0
+        for layer, token in coordinates:
+            exact = runtime.torch.equal(
+                clean.cache_values_by_call[layer][kind][token],
+                faulted.cache_values_by_call[layer][kind][token],
+            )
+            if exact:
+                exact_coordinates += 1
+            elif first_difference is None:
+                first_difference = {
+                    "layer_index": layer,
+                    "action_token_position": token,
+                }
+        result[kind] = {
+            "compared_coordinates": len(coordinates),
+            "exact_coordinates": exact_coordinates,
+            "all_coordinates_exact": exact_coordinates == len(coordinates),
+            "first_difference": first_difference,
+        }
+    return {
+        "scope": (
+            "all earlier action-token cache writes and the selected call through "
+            "the faulted block; these entries precede the output replacement"
+        ),
+        **result,
+    }
+
+
 def intervention_record(
     runtime: Runtime,
     *,
@@ -193,6 +244,13 @@ def intervention_record(
             runtime.torch,
             clean.trace.block_values[layer_index],
             source.block_values[layer_index],
+        ),
+        "cache_precondition": _cache_precondition(
+            runtime,
+            clean.trace,
+            faulted.trace,
+            layer_index=layer_index,
+            token_position=int(site["action_token_position"]),
         ),
         "propagation": propagation,
         "safe_feature": tensor_change(

@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.artifacts import artifact_record, write_npz_atomic
+from embodied_silent_failures.language_campaign import CACHE_REPLAY_STORAGE
 from embodied_silent_failures.language_interface import (
-    attention_tensor,
+    cache_tensor,
     downstream_coordinates,
     sequence_lengths,
     trace_tensor,
@@ -63,14 +64,18 @@ def _sparse_trace_values(
     reader: Any,
     *,
     include_selected_layer: bool,
+    references: list[PolicyDecision] | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, list[int], list[int], list[int]]:
     rows = []
     owners = []
     layers = []
     tokens = []
     encoding = None
-    for owner, (start_layer, decision) in enumerate(
-        zip(start_layers, decisions, strict=True)
+    if references is not None and len(references) != len(decisions):
+        raise ValueError("replay references do not align with replay decisions")
+    reference_values = references or [None] * len(decisions)
+    for owner, (start_layer, decision, reference) in enumerate(
+        zip(start_layers, decisions, reference_values, strict=True)
     ):
         trace = reader(runtime.torch, decision)
         coordinates = downstream_coordinates(
@@ -82,6 +87,26 @@ def _sparse_trace_values(
             [layer for layer, _token in coordinates],
             [token for _layer, token in coordinates],
         ]
+        if reference is not None:
+            reference_trace = reader(runtime.torch, reference)
+            reference_selected = reference_trace[
+                [layer for layer, _token in coordinates],
+                [token for _layer, token in coordinates],
+            ]
+            exact = (selected == reference_selected).reshape(len(coordinates), -1).all(
+                dim=-1
+            )
+            keep = ~exact
+            selected = selected[keep]
+            coordinates = [
+                coordinate
+                for coordinate, retained in zip(
+                    coordinates, keep.tolist(), strict=True
+                )
+                if retained
+            ]
+        if not coordinates:
+            continue
         encoded, current_encoding = _exact_array(runtime.torch, selected)
         encoding = encoding or current_encoding
         if current_encoding["torch_dtype"] != encoding["torch_dtype"]:
@@ -153,22 +178,31 @@ class InterfaceArchiveBuilder:
             )
         encodings = {}
         row_counts = {}
+        fault_by_layer = dict(zip(self.fault_layers, self.faults, strict=True))
+        replay_references = [
+            fault_by_layer[layer] for layer in self.replay_injection_layers
+        ]
         readers = {
-            "residuals": (trace_tensor, True, True),
-            "attention_key_projections": (
-                lambda module, decision: attention_tensor(module, decision, "key"),
+            "residuals": (trace_tensor, True, True, "boundary"),
+            "attention_cache_keys": (
+                lambda module, decision: cache_tensor(module, decision, "key"),
                 False,
-                True,
+                False,
+                "fault",
             ),
-            "attention_value_projections": (
-                lambda module, decision: attention_tensor(module, decision, "value"),
+            "attention_cache_values": (
+                lambda module, decision: cache_tensor(module, decision, "value"),
                 False,
-                True,
+                False,
+                "fault",
             ),
         }
-        for name, (reader, fault_includes_boundary, replay_includes_boundary) in (
-            readers.items()
-        ):
+        for name, (
+            reader,
+            fault_includes_boundary,
+            replay_includes_boundary,
+            replay_start,
+        ) in readers.items():
             for prefix, decision in (("source", self.source), ("clean", self.clean)):
                 encoded, encoding = _exact_array(torch, reader(torch, decision))
                 arrays[f"{prefix}_{name}"] = encoded
@@ -185,9 +219,14 @@ class InterfaceArchiveBuilder:
                 _sparse_trace_values(
                     self.runtime,
                     self.replays,
-                    self.replay_boundary_layers,
+                    (
+                        self.replay_injection_layers
+                        if replay_start == "fault"
+                        else self.replay_boundary_layers
+                    ),
                     reader,
                     include_selected_layer=replay_includes_boundary,
+                    references=replay_references,
                 )
             )
             if fault_values is not None:
@@ -230,7 +269,7 @@ class InterfaceArchiveBuilder:
 
         write_npz_atomic(path, np, arrays)
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact": artifact_record(path),
             "residual_axes": ["language_block", "action_token_position", "hidden"],
             "trace_encodings": encodings,
@@ -242,17 +281,23 @@ class InterfaceArchiveBuilder:
                     "post-block output; the selected boundary row is the exact "
                     "intervention or replay value"
                 ),
-                "attention_key_projections": (
-                    "pre-rotary key projection inside a block; a fault excludes "
-                    "its selected block because this port runs before the output "
-                    "replacement, while a replay includes its boundary to expose "
-                    "state omitted by output-only replay"
+                "attention_cache_keys": (
+                    "exact post-rotary key entry appended for the current token; "
+                    "only the new differential entry is stored because the earlier "
+                    "cache prefix predates the intervention; replay rows begin just "
+                    "after the original fault so the complete repaired cache cut is "
+                    "auditable"
                 ),
-                "attention_value_projections": (
-                    "value projection inside a block; row inclusion follows the "
-                    "same pre-output rule as the key projection"
+                "attention_cache_values": (
+                    "exact value entry appended for the current token, with the same "
+                    "differential-cache scope as the key entry"
                 ),
             },
+            "boundary_state": (
+                "post-block residual plus exact current-token key/value cache entries "
+                "from the fault output through the replay boundary"
+            ),
+            "replay_storage": CACHE_REPLAY_STORAGE,
             "replay_kind_ids": {"0": "immediate", "1": "final"},
             "generation_logits": {
                 "action_vocabulary_entries": 256,

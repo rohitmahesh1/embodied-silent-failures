@@ -21,6 +21,7 @@ from embodied_silent_failures.language_fault import LanguageBlockInjector
 from embodied_silent_failures.language_interface import (
     boundary_replay_record,
     boundary_replay_targets,
+    cache_replay_inputs,
     trace_repeatability,
 )
 from embodied_silent_failures.language_interface_archive import InterfaceArchiveBuilder
@@ -272,6 +273,11 @@ def run_context(
                     layer_index, replay_kinds
                 ):
                     try:
+                        cache_layers, cache_sources = cache_replay_inputs(
+                            faulted.trace,
+                            injection_layer=layer_index,
+                            boundary_layer=boundary_layer,
+                        )
                         replayed = policy_decision(
                             runtime,
                             policy_config,
@@ -287,6 +293,8 @@ def run_context(
                                     boundary_layer
                                 ]
                             },
+                            cache_replacement_layers=cache_layers,
+                            cache_sources=cache_sources,
                         )
                         interface_archive.add_replay(
                             injection_layer=layer_index,

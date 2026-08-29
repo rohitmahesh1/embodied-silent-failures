@@ -10,7 +10,7 @@ class LanguageInferenceTrace:
     action_token_position: int
     block_values: dict[int, Any]
     block_values_by_call: dict[int, dict[int, Any]]
-    attention_values_by_call: dict[int, dict[str, dict[int, Any]]]
+    cache_values_by_call: dict[int, dict[str, dict[int, Any]]]
     sequence_lengths_by_call: dict[int, dict[int, int]]
     call_counts: dict[int, int]
     anomalies: tuple[str, ...]
@@ -26,10 +26,12 @@ class LanguageBlockInjector:
         self._token_position = 0
         self._replacement_layer: int | None = None
         self._sources: Mapping[int, Any] = {}
+        self._cache_replacement_layers: frozenset[int] = frozenset()
+        self._cache_sources: Mapping[int, Mapping[str, Any]] = {}
         self._call_counts: dict[int, int] = {}
         self._block_values: dict[int, Any] = {}
         self._block_values_by_call: dict[int, dict[int, Any]] = {}
-        self._attention_values_by_call: dict[int, dict[str, dict[int, Any]]] = {}
+        self._cache_values_by_call: dict[int, dict[str, dict[int, Any]]] = {}
         self._sequence_lengths_by_call: dict[int, dict[int, int]] = {}
         self._last_trace: LanguageInferenceTrace | None = None
 
@@ -47,24 +49,21 @@ class LanguageBlockInjector:
             path = f"language_model.model.layers.{layer_index}"
             if path not in modules:
                 raise KeyError(f"policy has no traced language block {path}")
-            for suffix in ("k_proj", "v_proj"):
-                projection_path = f"{path}.self_attn.{suffix}"
-                if projection_path not in modules:
-                    raise KeyError(
-                        f"policy has no traced attention projection {projection_path}"
-                    )
+            attention_path = f"{path}.self_attn"
+            if attention_path not in modules:
+                raise KeyError(
+                    f"policy has no traced attention module {attention_path}"
+                )
         for layer_index in range(32):
             path = f"language_model.model.layers.{layer_index}"
             self._handles.append(
                 modules[path].register_forward_hook(self._hook(layer_index))
             )
-            for kind, suffix in (("key", "k_proj"), ("value", "v_proj")):
-                projection_path = f"{path}.self_attn.{suffix}"
-                self._handles.append(
-                    modules[projection_path].register_forward_hook(
-                        self._attention_hook(layer_index, kind)
-                    )
+            self._handles.append(
+                modules[f"{path}.self_attn"].register_forward_hook(
+                    self._cache_hook(layer_index)
                 )
+            )
 
     def close(self) -> None:
         for handle in self._handles:
@@ -72,6 +71,8 @@ class LanguageBlockInjector:
         self._handles.clear()
         self._active = False
         self._sources = {}
+        self._cache_replacement_layers = frozenset()
+        self._cache_sources = {}
 
     @contextmanager
     def inference(
@@ -80,6 +81,8 @@ class LanguageBlockInjector:
         *,
         replacement_layer: int | None = None,
         sources: Mapping[int, Any] | None = None,
+        cache_replacement_layers: frozenset[int] | None = None,
+        cache_sources: Mapping[int, Mapping[str, Any]] | None = None,
     ) -> Iterator[None]:
         if self._active:
             raise RuntimeError("language-block inference contexts cannot be nested")
@@ -89,14 +92,36 @@ class LanguageBlockInjector:
             raise ValueError("replacement layer must be between zero and 31")
         if replacement_layer is not None and replacement_layer not in (sources or {}):
             raise ValueError("replacement layer has no prior-decision source vector")
+        cache_replacement_layers = cache_replacement_layers or frozenset()
+        unknown_cache_layers = sorted(
+            layer
+            for layer in cache_replacement_layers
+            if not 0 <= layer < 32
+        )
+        if unknown_cache_layers:
+            raise ValueError(
+                f"cache replacement layers are invalid: {unknown_cache_layers}"
+            )
+        missing_cache_sources = sorted(
+            layer
+            for layer in cache_replacement_layers
+            if layer not in (cache_sources or {})
+        )
+        if missing_cache_sources:
+            raise ValueError(
+                "cache replacement layers have no source entries: "
+                f"{missing_cache_sources}"
+            )
         self._active = True
         self._token_position = action_token_position
         self._replacement_layer = replacement_layer
         self._sources = sources or {}
+        self._cache_replacement_layers = cache_replacement_layers
+        self._cache_sources = cache_sources or {}
         self._call_counts = {index: 0 for index in range(32)}
         self._block_values = {}
         self._block_values_by_call = {index: {} for index in range(32)}
-        self._attention_values_by_call = {
+        self._cache_values_by_call = {
             index: {"key": {}, "value": {}} for index in range(32)
         }
         self._sequence_lengths_by_call = {index: {} for index in range(32)}
@@ -115,25 +140,25 @@ class LanguageBlockInjector:
                 if layer_index not in self._block_values:
                     anomalies.append(f"layer {layer_index} has no captured token vector")
                 for kind in ("key", "value"):
-                    projection_calls = len(
-                        self._attention_values_by_call[layer_index][kind]
-                    )
-                    if projection_calls != calls:
+                    cache_calls = len(self._cache_values_by_call[layer_index][kind])
+                    if cache_calls != calls:
                         anomalies.append(
-                            f"layer {layer_index} observed {projection_calls} {kind} "
-                            f"projection calls for {calls} block calls"
+                            f"layer {layer_index} observed {cache_calls} exact cache "
+                            f"{kind} entries for {calls} block calls"
                         )
             self._last_trace = LanguageInferenceTrace(
                 action_token_position=action_token_position,
                 block_values=self._block_values,
                 block_values_by_call=self._block_values_by_call,
-                attention_values_by_call=self._attention_values_by_call,
+                cache_values_by_call=self._cache_values_by_call,
                 sequence_lengths_by_call=self._sequence_lengths_by_call,
                 call_counts=self._call_counts,
                 anomalies=tuple(anomalies),
             )
             self._active = False
             self._sources = {}
+            self._cache_replacement_layers = frozenset()
+            self._cache_sources = {}
 
     def _hook(self, layer_index: int):
         def observe(_module: Any, _inputs: Any, output: Any) -> Any:
@@ -181,21 +206,59 @@ class LanguageBlockInjector:
 
         return observe
 
-    def _attention_hook(self, layer_index: int, kind: str):
+    def _cache_hook(self, layer_index: int):
         def observe(_module: Any, _inputs: Any, output: Any) -> Any:
             if not self._active:
                 return output
-            if not isinstance(output, self._torch.Tensor) or output.ndim != 3:
-                raise TypeError("OpenVLA attention projection has an unexpected output")
-            call_index = len(self._attention_values_by_call[layer_index][kind])
-            # OpenVLA 300dce26 instantiates the language backbone from the
-            # pinned Transformers Llama blocks. These named k_proj/v_proj
-            # outputs are the mechanically observed inputs to the attention
-            # cache-write path; keys are still rotated downstream, so this does
-            # not claim to be a dump of the complete cache.
-            self._attention_values_by_call[layer_index][kind][call_index] = (
-                output[:, -1:, :].detach().clone()
-            )
+            # Transformers 4.40.1, modeling_llama.py::LlamaFlashAttention2.forward,
+            # returns its mutable DynamicCache after rotary encoding and cache
+            # update. The final sequence entry is the exact cache write caused by
+            # the current generation call in pinned OpenVLA 300dce26.
+            if not isinstance(output, tuple) or len(output) < 3:
+                raise TypeError("OpenVLA attention did not return its decoding cache")
+            cache = output[2]
+            if cache is None or not hasattr(cache, "key_cache") or not hasattr(
+                cache, "value_cache"
+            ):
+                raise TypeError("OpenVLA did not use the pinned DynamicCache interface")
+            call_index = len(self._cache_values_by_call[layer_index]["key"])
+            if len(self._cache_values_by_call[layer_index]["value"]) != call_index:
+                raise RuntimeError("cache key and value hooks lost call alignment")
+
+            for kind, attribute in (("key", "key_cache"), ("value", "value_cache")):
+                layers = getattr(cache, attribute)
+                if len(layers) <= layer_index:
+                    raise ValueError(
+                        f"decoding cache has no {kind} entry for layer {layer_index}"
+                    )
+                full_value = layers[layer_index]
+                if (
+                    not isinstance(full_value, self._torch.Tensor)
+                    or full_value.ndim != 4
+                ):
+                    raise TypeError("OpenVLA decoding cache has an unexpected tensor")
+                current = full_value[:, :, -1:, :]
+                if (
+                    call_index == self._token_position
+                    and layer_index in self._cache_replacement_layers
+                ):
+                    source = self._cache_sources[layer_index].get(kind)
+                    if source is None:
+                        raise ValueError(
+                            f"cache source for layer {layer_index} has no {kind} entry"
+                        )
+                    if (
+                        tuple(source.shape) != tuple(current.shape)
+                        or source.dtype != current.dtype
+                        or source.device != current.device
+                    ):
+                        raise ValueError(
+                            "faulted and replay cache entries differ in schema"
+                        )
+                    current.copy_(source)
+                self._cache_values_by_call[layer_index][kind][call_index] = (
+                    current.detach().clone()
+                )
             return output
 
         return observe

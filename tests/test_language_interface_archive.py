@@ -34,10 +34,16 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
             action_token_position=token_position,
             block_values={layer: by_call[layer][token_position] for layer in range(32)},
             block_values_by_call=by_call,
-            attention_values_by_call={
+            cache_values_by_call={
                 layer: {
-                    "key": {token: value.clone() for token, value in calls.items()},
-                    "value": {token: value.clone() for token, value in calls.items()},
+                    "key": {
+                        token: value.reshape(1, 2, 1, 2).clone()
+                        for token, value in calls.items()
+                    },
+                    "value": {
+                        token: value.reshape(1, 2, 1, 2).clone()
+                        for token, value in calls.items()
+                    },
                 }
                 for layer, calls in by_call.items()
             },
@@ -94,10 +100,10 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
             with self.np.load(path, allow_pickle=False) as archive:
                 self.assertEqual(archive["clean_residuals"].shape, (32, 7, 4))
                 self.assertEqual(
-                    archive["clean_attention_key_projections"].shape, (32, 7, 4)
+                    archive["clean_attention_cache_keys"].shape, (32, 7, 2, 2)
                 )
                 self.assertEqual(
-                    archive["clean_attention_value_projections"].shape, (32, 7, 4)
+                    archive["clean_attention_cache_values"].shape, (32, 7, 2, 2)
                 )
                 self.assertEqual(archive["fault_layer"].tolist(), [30])
                 self.assertEqual(archive["replay_boundary_layer"].tolist(), [31])
@@ -108,16 +114,41 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
                 )
                 self.assertEqual(archive["fault_residuals"].shape[0], 130)
                 self.assertEqual(
-                    archive["fault_attention_key_projections"].shape[0], 129
-                )
-                self.assertEqual(
-                    archive["fault_attention_key_projections_row_layer"][0], 31
-                )
-                self.assertEqual(
-                    archive["replay_attention_key_projections_row_layer"][0], 31
+                    archive["replay_attention_cache_keys_row_layer"][0], 31
                 )
             self.assertEqual(record["fault_records"], 1)
             self.assertEqual(record["boundary_replay_records"], 1)
+            self.assertEqual(record["schema_version"], 2)
+
+    def test_exact_replay_reuses_the_fault_trace_without_duplicate_rows(self) -> None:
+        from embodied_silent_failures.language_interface_archive import (
+            InterfaceArchiveBuilder,
+        )
+
+        runtime = SimpleNamespace(torch=self.torch, np=self.np)
+        builder = InterfaceArchiveBuilder(
+            runtime, self._decision(1.0), self._decision(2.0)
+        )
+        builder.add_fault(30, self._decision(3.0))
+        builder.add_replay(
+            injection_layer=30,
+            boundary_layer=31,
+            boundary_kind="immediate",
+            decision=self._decision(3.0),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "interfaces.npz"
+            record = builder.write(path)
+            with self.np.load(path, allow_pickle=False) as archive:
+                self.assertNotIn("replay_residuals", archive.files)
+                self.assertNotIn("replay_attention_cache_keys", archive.files)
+                self.assertNotIn("replay_attention_cache_values", archive.files)
+                self.assertEqual(archive["replay_action_logits"].shape, (1, 7, 256))
+            self.assertEqual(record["trace_row_counts"]["replay_residuals"], 0)
+            self.assertEqual(
+                record["trace_row_counts"]["replay_attention_cache_keys"], 0
+            )
 
     def test_boundary_target_selection_does_not_duplicate_final_layer(self) -> None:
         from embodied_silent_failures.language_interface import (
@@ -133,6 +164,56 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
             [("immediate", 31)],
         )
         self.assertEqual(boundary_replay_targets(31, ["immediate", "final"]), [])
+
+    def test_cache_replay_uses_every_changed_entry_through_the_boundary(self) -> None:
+        from embodied_silent_failures.language_interface import cache_replay_inputs
+
+        fault = self._decision(3.0, token_position=4)
+
+        layers, sources = cache_replay_inputs(
+            fault.trace,
+            injection_layer=27,
+            boundary_layer=31,
+        )
+
+        self.assertEqual(layers, frozenset({28, 29, 30, 31}))
+        self.assertEqual(set(sources), set(layers))
+        self.assertTrue(
+            self.torch.equal(
+                sources[31]["key"],
+                fault.trace.cache_values_by_call[31]["key"][4],
+            )
+        )
+
+    def test_cache_precondition_covers_only_state_before_the_fault_output(self) -> None:
+        from embodied_silent_failures.language_policy import _cache_precondition
+
+        runtime = SimpleNamespace(torch=self.torch, np=self.np)
+        clean = self._decision(2.0, token_position=2)
+        fault = self._decision(3.0, token_position=2)
+        for token in range(2):
+            for layer in range(32):
+                for kind in ("key", "value"):
+                    fault.trace.cache_values_by_call[layer][kind][token] = (
+                        clean.trace.cache_values_by_call[layer][kind][token].clone()
+                    )
+        for layer in range(11):
+            for kind in ("key", "value"):
+                fault.trace.cache_values_by_call[layer][kind][2] = (
+                    clean.trace.cache_values_by_call[layer][kind][2].clone()
+                )
+
+        record = _cache_precondition(
+            runtime,
+            clean.trace,
+            fault.trace,
+            layer_index=10,
+            token_position=2,
+        )
+
+        self.assertTrue(record["key"]["all_coordinates_exact"])
+        self.assertTrue(record["value"]["all_coordinates_exact"])
+        self.assertEqual(record["key"]["compared_coordinates"], 75)
 
     def test_replay_distinguishes_exact_output_from_omitted_attention_state(self) -> None:
         from embodied_silent_failures.language_interface import (
@@ -159,13 +240,7 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
         )
 
         self.assertTrue(record["residual_path"]["all_coordinates_exact"])
-        self.assertFalse(
-            record["attention_key_projections"]["all_coordinates_exact"]
-        )
-        self.assertEqual(
-            record["attention_key_projections"]["first_difference"],
-            {"layer_index": 31, "action_token_position": 2},
-        )
+        self.assertFalse(record["cache_cut"]["keys"]["all_coordinates_exact"])
 
     def test_bfloat_archive_encoding_preserves_exact_bits(self) -> None:
         from embodied_silent_failures.language_interface_archive import _exact_array

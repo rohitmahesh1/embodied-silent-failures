@@ -1,9 +1,12 @@
 import unittest
 
 from embodied_silent_failures.language_campaign import (
+    CACHE_AWARE_BOUNDARY_STATE,
+    CACHE_REPLAY_STORAGE,
     build_contexts,
     language_block_sites,
     select_clean_trajectories,
+    validate_language_campaign_manifest,
 )
 
 
@@ -44,6 +47,24 @@ def _clean_frame():
 
 
 class LanguageCampaignTests(unittest.TestCase):
+    def _manifest(self, instrumentation):
+        trajectories = select_clean_trajectories(_clean_frame(), seed=31)
+        contexts = build_contexts(trajectories, seed=31)
+        return {
+            "schema_version": 1,
+            "sites": language_block_sites(_table()),
+            "contexts": contexts,
+            "clean_trajectories": trajectories,
+            "counts": {
+                "contexts": len(contexts),
+                "trajectories_per_task": 5,
+                "development_trajectories_per_task": 3,
+            },
+            "excluded_prior_trajectories": [],
+            "excluded_prior_trajectory_count": 0,
+            "instrumentation": instrumentation,
+        }
+
     def test_sites_are_a_complete_block_by_token_census(self) -> None:
         sites = language_block_sites(_table())
 
@@ -126,6 +147,22 @@ class LanguageCampaignTests(unittest.TestCase):
                 sum(value["analysis_split"] == "holdout" for value in task_values),
                 1,
             )
+
+    def test_full_interface_manifest_requires_exact_cache_replay(self) -> None:
+        instrumentation = {
+            "full_language_interfaces": True,
+            "language_ports": [
+                "exact post-rotary current-token key cache entry",
+                "exact current-token value cache entry",
+            ],
+            "boundary_state": CACHE_AWARE_BOUNDARY_STATE,
+            "boundary_replay_storage": CACHE_REPLAY_STORAGE,
+        }
+
+        validate_language_campaign_manifest(self._manifest(instrumentation))
+        incomplete = {**instrumentation, "language_ports": []}
+        with self.assertRaises(ValueError):
+            validate_language_campaign_manifest(self._manifest(incomplete))
 
 
 if __name__ == "__main__":
