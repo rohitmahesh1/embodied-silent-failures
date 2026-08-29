@@ -14,11 +14,24 @@ from embodied_silent_failures.openvla_runtime import Runtime
 
 
 @dataclass(frozen=True)
+class GenerationLogitTrace:
+    sequence_token_ids: Any
+    action_token_logits: Any
+    top_token_ids: Any
+    top_token_logits: Any
+    log_normalizer: Any
+    entropy: Any
+    vocabulary_size: int
+    action_token_start: int
+
+
+@dataclass(frozen=True)
 class PolicyDecision:
     raw_action: Any
     command: Any
     action_tokens: tuple[int, ...]
     hidden_states: Any
+    generation_logits: GenerationLogitTrace
     trace: LanguageInferenceTrace | None
     inference_seconds: float
 
@@ -32,6 +45,34 @@ def _hidden_states(runtime: Runtime, generated: Any) -> Any:
     if result.ndim != 2 or result.shape[0] != 7:
         raise ValueError(f"unexpected OpenVLA hidden-state shape: {tuple(result.shape)}")
     return result
+
+
+def _generation_logits(runtime: Runtime, generated: Any) -> GenerationLogitTrace:
+    # SAFE OpenVLA 300dce26, modeling_prismatic.py::predict_action, decodes
+    # actions from the final 256 vocabulary entries. Keep that complete action
+    # vocabulary plus the global top tokens and exact normalization summaries;
+    # this avoids archiving the unrelated full language vocabulary per fault.
+    values = [value[0].detach().to(runtime.torch.float32) for value in generated["logits"]]
+    logits = runtime.torch.stack(values, dim=0)
+    if logits.ndim != 2 or logits.shape[0] != 7 or logits.shape[1] < 256:
+        raise ValueError(f"unexpected OpenVLA logit shape: {tuple(logits.shape)}")
+    top_count = min(32, int(logits.shape[1]))
+    top_logits, top_ids = runtime.torch.topk(logits, k=top_count, dim=-1)
+    log_normalizer = runtime.torch.logsumexp(logits, dim=-1)
+    probabilities = runtime.torch.softmax(logits, dim=-1)
+    log_probabilities = runtime.torch.log_softmax(logits, dim=-1)
+    entropy = -(probabilities * log_probabilities).sum(dim=-1)
+    vocabulary_size = int(logits.shape[1])
+    return GenerationLogitTrace(
+        sequence_token_ids=generated["sequences"][0].detach().cpu(),
+        action_token_logits=logits[:, -256:].detach().cpu(),
+        top_token_ids=top_ids.detach().cpu(),
+        top_token_logits=top_logits.detach().cpu(),
+        log_normalizer=log_normalizer.detach().cpu(),
+        entropy=entropy.detach().cpu(),
+        vocabulary_size=vocabulary_size,
+        action_token_start=vocabulary_size - 256,
+    )
 
 
 def policy_decision(
@@ -94,6 +135,7 @@ def policy_decision(
         command=runtime.np.asarray(command).copy(),
         action_tokens=tuple(int(value) for value in action_tokens.tolist()),
         hidden_states=_hidden_states(runtime, generated),
+        generation_logits=_generation_logits(runtime, generated),
         trace=injector.last_trace if injector is not None else None,
         inference_seconds=inference_seconds,
     )

@@ -18,6 +18,12 @@ from embodied_silent_failures.language_context import (
     write_terminal_branch,
 )
 from embodied_silent_failures.language_fault import LanguageBlockInjector
+from embodied_silent_failures.language_interface import (
+    boundary_replay_record,
+    boundary_replay_targets,
+    trace_repeatability,
+)
+from embodied_silent_failures.language_interface_archive import InterfaceArchiveBuilder
 from embodied_silent_failures.language_policy import (
     intervention_record,
     policy_decision,
@@ -168,6 +174,7 @@ def run_context(
     wait_steps: int,
     maximum_faulted_terminal_branches: int | None,
     branch_state_restoration: str,
+    instrumentation: dict[str, Any] | None,
     context: dict[str, Any],
     sites: dict[tuple[int, int], dict[str, Any]],
     runtime: Any,
@@ -185,6 +192,9 @@ def run_context(
             f"unknown branch state restoration: {branch_state_restoration}"
         )
     restore_directly = branch_state_restoration == "direct"
+    instrumentation = instrumentation or {}
+    interface_enabled = bool(instrumentation.get("full_language_interfaces", False))
+    replay_kinds = list(instrumentation.get("boundary_replays", []))
     context_dir = output_dir / "contexts" / str(context["context_id"])
     context_dir.mkdir(parents=True, exist_ok=True)
     complete_path = context_dir / "context.complete.json"
@@ -224,6 +234,14 @@ def run_context(
     local_records = []
     candidates = []
     faulted_features = {}
+    if interface_enabled and captured.source_decision is None:
+        raise RuntimeError("instrumented context has no captured source decision")
+    interface_archive = (
+        InterfaceArchiveBuilder(runtime, captured.source_decision, clean)
+        if interface_enabled
+        else None
+    )
+    boundary_replays = []
     for layer_index in range(32):
         site = sites[(layer_index, token_position)]
         try:
@@ -248,6 +266,54 @@ def run_context(
             )
             local_records.append(record)
             faulted_features[layer_index] = faulted.hidden_states
+            if interface_archive is not None:
+                interface_archive.add_fault(layer_index, faulted)
+                for boundary_kind, boundary_layer in boundary_replay_targets(
+                    layer_index, replay_kinds
+                ):
+                    try:
+                        replayed = policy_decision(
+                            runtime,
+                            policy_config,
+                            model,
+                            processor,
+                            captured.observation,
+                            task_description,
+                            injector=injector,
+                            action_token_position=token_position,
+                            replacement_layer=boundary_layer,
+                            sources={
+                                boundary_layer: faulted.trace.block_values[
+                                    boundary_layer
+                                ]
+                            },
+                        )
+                        interface_archive.add_replay(
+                            injection_layer=layer_index,
+                            boundary_layer=boundary_layer,
+                            boundary_kind=boundary_kind,
+                            decision=replayed,
+                        )
+                        boundary_replays.append(
+                            boundary_replay_record(
+                                runtime,
+                                original=faulted,
+                                replay=replayed,
+                                injection_layer=layer_index,
+                                boundary_layer=boundary_layer,
+                                boundary_kind=boundary_kind,
+                            )
+                        )
+                    except Exception as error:
+                        boundary_replays.append(
+                            error_record(
+                                "boundary_replay_exception",
+                                error,
+                                injection_layer=layer_index,
+                                boundary_layer=boundary_layer,
+                                boundary_kind=boundary_kind,
+                            )
+                        )
             if not record["executed_command"]["exact_equal"]:
                 candidates.append((layer_index, faulted, record))
         except Exception as error:
@@ -283,6 +349,15 @@ def run_context(
         ),
         "hook_anomalies": list(repeated_clean.trace.anomalies),
     }
+    if interface_enabled:
+        try:
+            repeated_clean_record["full_trace"] = trace_repeatability(
+                runtime.torch, clean, repeated_clean
+            )
+        except Exception as error:
+            repeated_clean_record["full_trace"] = error_record(
+                "clean_trace_repeatability_exception", error
+            )
     feature_path = context_dir / "local_features.pkl"
     write_pickle_atomic(
         feature_path,
@@ -293,10 +368,23 @@ def run_context(
             "faulted_hidden_states_by_layer": faulted_features,
         },
     )
+    interface_archive_record = None
+    interface_archive_error = None
+    if interface_archive is not None:
+        try:
+            interface_archive_record = interface_archive.write(
+                context_dir / "language_interfaces.npz"
+            )
+        except Exception as error:
+            interface_archive_error = f"{type(error).__name__}: {error}"
+            write_json_atomic(
+                context_dir / "language_interfaces.error.json",
+                error_record("language_interface_archive_exception", error),
+            )
     write_json_atomic(
         context_dir / "local.json",
         {
-            "schema_version": 1,
+            "schema_version": 2 if interface_enabled else 1,
             "status": "complete",
             "context": context,
             "captured_simulator_state_sha256": captured.simulator_state_sha256,
@@ -307,6 +395,9 @@ def run_context(
             "clean_hook_anomalies": list(clean.trace.anomalies),
             "clean_inference_seconds": clean.inference_seconds,
             "feature_archive": artifact_record(feature_path),
+            "interface_archive": interface_archive_record,
+            "interface_archive_error": interface_archive_error,
+            "boundary_replays": boundary_replays,
             "repeated_clean": repeated_clean_record,
             "interventions": local_records,
         },
@@ -429,6 +520,14 @@ def run_context(
         ),
         "branches": branch_results,
         "repeated_clean": repeated_clean_record,
+        "interface_archive_complete": interface_archive_record is not None,
+        "interface_archive_error": interface_archive_error,
+        "boundary_replays_complete": sum(
+            record.get("status") == "complete" for record in boundary_replays
+        ),
+        "boundary_replays_error": sum(
+            record.get("status") == "error" for record in boundary_replays
+        ),
         "finished_at": now(),
     }
     write_json_atomic(complete_path, summary)

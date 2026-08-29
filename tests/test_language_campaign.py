@@ -95,6 +95,38 @@ class LanguageCampaignTests(unittest.TestCase):
             all(len(workers) == 1 for workers in worker_by_trajectory.values())
         )
 
+    def test_prior_trajectories_can_be_excluded_before_balanced_sampling(self) -> None:
+        excluded = {(task, episode) for task in range(10) for episode in range(5)}
+
+        trajectories = select_clean_trajectories(
+            _clean_frame(),
+            seed=41,
+            trajectories_per_task=3,
+            development_trajectories_per_task=2,
+            excluded_trajectories=excluded,
+        )
+        contexts = build_contexts(trajectories, seed=41)
+
+        self.assertEqual(len(trajectories), 30)
+        self.assertEqual(len(contexts), 90)
+        self.assertFalse(
+            excluded
+            & {
+                (int(value["task_id"]), int(value["episode_index"]))
+                for value in trajectories
+            }
+        )
+        for task in range(10):
+            task_values = [value for value in trajectories if value["task_id"] == task]
+            self.assertEqual(
+                sum(value["analysis_split"] == "development" for value in task_values),
+                2,
+            )
+            self.assertEqual(
+                sum(value["analysis_split"] == "holdout" for value in task_values),
+                1,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

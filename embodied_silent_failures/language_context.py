@@ -18,6 +18,7 @@ from embodied_silent_failures.language_fault import (
     LanguageInferenceTrace,
 )
 from embodied_silent_failures.language_policy import PolicyDecision, policy_decision
+from embodied_silent_failures.language_trajectory_archive import TrajectoryRecorder
 from embodied_silent_failures.openvla_rollout import MAX_STEPS
 from embodied_silent_failures.openvla_runtime import Runtime, array_sha256
 from embodied_silent_failures.plan import Trial
@@ -35,7 +36,8 @@ class CapturedContext:
     prefix_commands: tuple[Any, ...]
     prefix_hidden_states: tuple[Any, ...]
     prefix_rows: tuple[dict[str, Any], ...]
-    source_trace: LanguageInferenceTrace
+    source_trace: LanguageInferenceTrace | None
+    source_decision: PolicyDecision | None = None
 
 
 def write_captured_context_archive(
@@ -80,7 +82,7 @@ def write_captured_context_archive(
 
 
 def _action_row(policy_step: int, command: Any, decision: PolicyDecision) -> dict[str, Any]:
-    return {
+    row = {
         "action/timestep": policy_step,
         "action/dx": command[0],
         "action/dy": command[1],
@@ -91,6 +93,11 @@ def _action_row(policy_step: int, command: Any, decision: PolicyDecision) -> dic
         "action/dgripper": command[6],
         "timing/inference_seconds": decision.inference_seconds,
     }
+    for index, value in enumerate(decision.raw_action):
+        row[f"policy/raw_action_{index}"] = value
+    for index, value in enumerate(decision.action_tokens):
+        row[f"policy/action_token_{index}"] = value
+    return row
 
 
 def _start_episode(runtime: Runtime, env: Any, initial_state: Any, wait_steps: int) -> Any:
@@ -120,6 +127,7 @@ def capture_context(
     prefix_hidden_states = []
     prefix_rows = []
     source_trace = None
+    source_decision = None
     source_step = int(context["source_policy_step"])
     token_position = int(context["action_token_position"])
     policy_steps = int(context["policy_step"])
@@ -139,6 +147,7 @@ def capture_context(
         )
         if trace_source:
             source_trace = decision.trace
+            source_decision = decision
         command = runtime.np.asarray(
             decision.command
             if executed_prefix is None
@@ -156,7 +165,7 @@ def capture_context(
                 f"clean rerun succeeded at step {policy_step} before context "
                 f"{context['context_id']}"
             )
-    if source_trace is None:
+    if source_trace is None or source_decision is None:
         raise RuntimeError("previous-decision language-block values were not captured")
     simulator_state = runtime.np.asarray(env.get_sim_state()).copy()
     return CapturedContext(
@@ -166,6 +175,7 @@ def capture_context(
         prefix_commands=tuple(prefix_commands),
         prefix_hidden_states=tuple(prefix_hidden_states),
         prefix_rows=tuple(prefix_rows),
+        source_decision=source_decision,
         source_trace=source_trace,
     )
 
@@ -280,8 +290,20 @@ def run_terminal_branch(
         )
     rows = [dict(row) for row in captured.prefix_rows]
     hidden_states = list(captured.prefix_hidden_states)
+    trajectory = TrajectoryRecorder(runtime)
     policy_step = int(context["policy_step"])
+    trajectory.append(
+        policy_step=policy_step,
+        stage="before_action",
+        observation=observation,
+        simulator_state=env.get_sim_state(),
+    )
     command = runtime.np.asarray(target_decision.command).copy()
+    trajectory.append_decision(
+        policy_step=policy_step,
+        decision=target_decision,
+        executed_command=command,
+    )
     row = _action_row(policy_step, command, target_decision)
     observation, reward, done, _ = env.step(command.tolist())
     row["environment/reward"] = reward
@@ -293,6 +315,12 @@ def run_terminal_branch(
     for next_step in range(policy_step + 1, MAX_STEPS[policy_config.task_suite_name]):
         if success:
             break
+        trajectory.append(
+            policy_step=next_step,
+            stage="before_action",
+            observation=observation,
+            simulator_state=env.get_sim_state(),
+        )
         decision = policy_decision(
             runtime,
             policy_config,
@@ -302,6 +330,11 @@ def run_terminal_branch(
             task_description,
         )
         command = runtime.np.asarray(decision.command).copy()
+        trajectory.append_decision(
+            policy_step=next_step,
+            decision=decision,
+            executed_command=command,
+        )
         row = _action_row(next_step, command, decision)
         observation, reward, done, _ = env.step(command.tolist())
         row["environment/reward"] = reward
@@ -309,10 +342,17 @@ def run_terminal_branch(
         rows.append(row)
         hidden_states.append(decision.hidden_states)
         success = bool(done)
+    trajectory.append(
+        policy_step=(int(rows[-1]["action/timestep"]) + 1),
+        stage="after_final_action",
+        observation=observation,
+        simulator_state=env.get_sim_state(),
+    )
     return {
         "success": success,
         "rows": rows,
         "hidden_states": runtime.torch.stack(hidden_states, dim=0),
+        "trajectory": trajectory,
         "replay": replay,
     }
 
@@ -333,6 +373,7 @@ def write_terminal_branch(
     stem = safe_stem(trial, bool(branch["success"]))
     csv_path = output_dir / f"{stem}.csv"
     pickle_path = output_dir / f"{stem}.pkl"
+    trajectory_path = output_dir / f"{stem}.trajectory.npz"
     write_csv_atomic(csv_path, branch["rows"])
     write_pickle_atomic(
         pickle_path,
@@ -349,6 +390,20 @@ def write_terminal_branch(
             "mp4_path": None,
         },
     )
+    trajectory_archive = None
+    trajectory_error = None
+    try:
+        trajectory_archive = branch["trajectory"].write(trajectory_path)
+    except Exception as error:
+        trajectory_error = f"{type(error).__name__}: {error}"
+        write_json_atomic(
+            output_dir / f"{stem}.trajectory.error.json",
+            {
+                "schema_version": 1,
+                "status": "error",
+                "error": trajectory_error,
+            },
+        )
     write_json_atomic(
         output_dir / "run.json",
         {
@@ -360,7 +415,7 @@ def write_terminal_branch(
         },
     )
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "complete",
         "condition": condition,
         "task_suite_name": "libero_10",
@@ -376,12 +431,19 @@ def write_terminal_branch(
         "fault": fault,
         "context_replay": branch["replay"],
         "execution": execution,
+        "trajectory_archive": trajectory_archive,
+        "trajectory_archive_error": trajectory_error,
         "files": {
             "csv": csv_path.name,
             "pickle": pickle_path.name,
             "video": None,
+            "trajectory": trajectory_path.name if trajectory_archive else None,
         },
-        "artifact_manifest": [artifact_record(csv_path), artifact_record(pickle_path)],
+        "artifact_manifest": [
+            artifact_record(csv_path),
+            artifact_record(pickle_path),
+            *([artifact_record(trajectory_path)] if trajectory_archive else []),
+        ],
     }
     write_json_atomic(
         output_dir / f"task{trial.task_id}--ep{trial.episode_index}.complete.json",

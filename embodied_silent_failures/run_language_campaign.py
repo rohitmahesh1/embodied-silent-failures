@@ -126,6 +126,19 @@ def _execution(args: argparse.Namespace, manifest: dict[str, Any]) -> dict[str, 
         "language_policy_sha256": file_sha256(
             root / "embodied_silent_failures" / "language_policy.py"
         ),
+        "language_interface_sha256": file_sha256(
+            root / "embodied_silent_failures" / "language_interface.py"
+        ),
+        "language_interface_archive_sha256": file_sha256(
+            root
+            / "embodied_silent_failures"
+            / "language_interface_archive.py"
+        ),
+        "language_trajectory_archive_sha256": file_sha256(
+            root
+            / "embodied_silent_failures"
+            / "language_trajectory_archive.py"
+        ),
         "language_worker_sha256": file_sha256(
             root / "embodied_silent_failures" / "language_worker.py"
         ),
@@ -246,6 +259,7 @@ def main() -> None:
                             args.maximum_faulted_terminal_branches
                         ),
                         branch_state_restoration=args.branch_state_restoration,
+                        instrumentation=manifest.get("instrumentation"),
                         context=context,
                         sites=sites,
                         runtime=runtime,

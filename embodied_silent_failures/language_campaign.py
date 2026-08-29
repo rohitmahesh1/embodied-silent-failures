@@ -29,6 +29,27 @@ def language_block_sites(table: dict[str, Any]) -> list[dict[str, Any]]:
         identity = site.get("identity", {})
         match = _BLOCK_PATH.fullmatch(str(identity.get("module_path", "")))
         if (
+            match is not None
+            and "layer_index" in site
+            and "action_token_position" in site
+            and site.get("status") is None
+        ):
+            # A pinned prior language-campaign manifest already contains the
+            # mechanically filtered 32 x 7 census and its original site IDs.
+            # Reusing those records preserves that provenance without needing
+            # the much larger source trace on every worker.
+            selected.append(
+                {
+                    "layer_index": int(site["layer_index"]),
+                    "action_token_position": int(site["action_token_position"]),
+                    "site_id": site["site_id"],
+                    "identity": identity,
+                    "observed_schemas": site["observed_schemas"],
+                    "topologies": site["topologies"],
+                }
+            )
+            continue
+        if (
             site.get("status") != "structurally_eligible_pending_canary"
             or identity.get("kind") != "module_output"
             or identity.get("output_port") != "value[0]"
@@ -69,8 +90,18 @@ def language_block_sites(table: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def select_clean_trajectories(
-    clean_frame: list[dict[str, Any]], *, seed: int
+    clean_frame: list[dict[str, Any]],
+    *,
+    seed: int,
+    trajectories_per_task: int = TRAJECTORIES_PER_TASK,
+    development_trajectories_per_task: int = DEVELOPMENT_TRAJECTORIES_PER_TASK,
+    excluded_trajectories: set[tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]]:
+    if trajectories_per_task <= 0:
+        raise ValueError("trajectories per task must be positive")
+    if not 0 <= development_trajectories_per_task <= trajectories_per_task:
+        raise ValueError("development trajectories must be between zero and the total")
+    excluded_trajectories = excluded_trajectories or set()
     by_task: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for trajectory in clean_frame:
         by_task[int(trajectory["task_id"])].append(trajectory)
@@ -80,28 +111,50 @@ def select_clean_trajectories(
     rng = random.Random(seed)
     selected = []
     for task_id in range(10):
-        population = sorted(
+        full_population = sorted(
             by_task[task_id], key=lambda value: int(value["episode_index"])
         )
-        if len(population) < TRAJECTORIES_PER_TASK:
-            raise ValueError(f"task {task_id} has fewer than five clean successes")
-        sample = rng.sample(population, TRAJECTORIES_PER_TASK)
+        population = [
+            value
+            for value in full_population
+            if (task_id, int(value["episode_index"])) not in excluded_trajectories
+        ]
+        if len(population) < trajectories_per_task:
+            raise ValueError(
+                f"task {task_id} has only {len(population)} eligible clean successes, "
+                f"fewer than the requested {trajectories_per_task}"
+            )
+        sample = rng.sample(population, trajectories_per_task)
         for index, trajectory in enumerate(sample):
             selected.append(
                 {
                     **trajectory,
                     "analysis_split": (
                         "development"
-                        if index < DEVELOPMENT_TRAJECTORIES_PER_TASK
+                        if index < development_trajectories_per_task
                         else "holdout"
                     ),
-                    "task_success_population": len(population),
+                    "task_success_population": len(full_population),
+                    "excluded_prior_trajectories": len(full_population) - len(population),
+                    "eligible_trajectory_population": len(population),
                     "trajectory_inclusion_probability": (
-                        TRAJECTORIES_PER_TASK / len(population)
+                        trajectories_per_task / len(population)
                     ),
                 }
             )
     return selected
+
+
+def trajectory_keys_from_manifests(paths: list[Path]) -> set[tuple[int, int]]:
+    keys = set()
+    for path in paths:
+        manifest = load_json(path)
+        trajectories = manifest.get("clean_trajectories")
+        if not isinstance(trajectories, list):
+            raise ValueError(f"excluded manifest has no clean trajectories: {path}")
+        for value in trajectories:
+            keys.add((int(value["task_id"]), int(value["episode_index"])))
+    return keys
 
 
 def build_contexts(
@@ -174,10 +227,22 @@ def build_language_campaign_manifest(
     clean_root: Path,
     *,
     seed: int,
+    trajectories_per_task: int = TRAJECTORIES_PER_TASK,
+    development_trajectories_per_task: int = DEVELOPMENT_TRAJECTORIES_PER_TASK,
+    exclude_manifest_paths: list[Path] | None = None,
+    instrumentation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    exclude_manifest_paths = exclude_manifest_paths or []
     table = load_json(table_path)
     sites = language_block_sites(table)
-    trajectories = select_clean_trajectories(clean_success_frame(clean_root), seed=seed)
+    excluded_trajectories = trajectory_keys_from_manifests(exclude_manifest_paths)
+    trajectories = select_clean_trajectories(
+        clean_success_frame(clean_root),
+        seed=seed,
+        trajectories_per_task=trajectories_per_task,
+        development_trajectories_per_task=development_trajectories_per_task,
+        excluded_trajectories=excluded_trajectories,
+    )
     contexts = build_contexts(trajectories, seed=seed)
 
     clean_trajectories = []
@@ -198,7 +263,7 @@ def build_language_campaign_manifest(
     split_counts = Counter(context["analysis_split"] for context in contexts)
     worker_counts = Counter(context["worker_shard"] for context in contexts)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "campaign": "openvla_language_block_temporal_replacement",
         "seed": seed,
         "fault_model": {
@@ -216,12 +281,20 @@ def build_language_campaign_manifest(
         "sampling_design": {
             "site_population": "census all 32 language-block residual outputs",
             "trajectory_sampling": (
-                "seeded uniform sample of five clean-success trajectories per task"
+                f"seeded uniform sample of {trajectories_per_task} eligible "
+                "clean-success trajectories per task without replacement"
+            ),
+            "prior_trajectory_exclusion": (
+                "exclude every task and episode pair named by the pinned prior manifests"
+                if exclude_manifest_paths
+                else "none"
             ),
             "phase_fractions": PHASES,
             "analysis_split": (
-                "within each task, keep three trajectories in development and two "
-                "in holdout; all phases from one trajectory stay together"
+                f"within each task, keep {development_trajectories_per_task} "
+                "trajectories in development and "
+                f"{trajectories_per_task - development_trajectories_per_task} in "
+                "holdout; all phases from one trajectory stay together"
             ),
             "token_assignment": (
                 "seeded shuffle of a balanced seven-position multiset; counts differ "
@@ -236,6 +309,10 @@ def build_language_campaign_manifest(
             "language_blocks": LANGUAGE_BLOCK_COUNT,
             "action_token_positions": ACTION_TOKEN_COUNT,
             "trajectories": len(trajectories),
+            "trajectories_per_task": trajectories_per_task,
+            "development_trajectories_per_task": (
+                development_trajectories_per_task
+            ),
             "contexts": len(contexts),
             "local_interventions": len(contexts) * LANGUAGE_BLOCK_COUNT,
             "contexts_by_split": dict(sorted(split_counts.items())),
@@ -247,6 +324,15 @@ def build_language_campaign_manifest(
             },
         },
         "sites": sites,
+        "excluded_prior_manifests": [
+            _artifact_record(path) for path in exclude_manifest_paths
+        ],
+        "excluded_prior_trajectory_count": len(excluded_trajectories),
+        "excluded_prior_trajectories": [
+            {"task_id": task_id, "episode_index": episode_index}
+            for task_id, episode_index in sorted(excluded_trajectories)
+        ],
+        "instrumentation": instrumentation or {},
         "clean_trajectories": clean_trajectories,
         "contexts": contexts,
     }
@@ -260,14 +346,33 @@ def manifest_sha256(manifest: dict[str, Any]) -> str:
 
 
 def validate_language_campaign_manifest(manifest: dict[str, Any]) -> None:
-    if manifest.get("schema_version") != 1:
-        raise ValueError("language campaign manifest must use schema version 1")
+    if manifest.get("schema_version") not in {1, 2}:
+        raise ValueError("language campaign manifest must use schema version 1 or 2")
     sites = manifest.get("sites")
     contexts = manifest.get("contexts")
     if not isinstance(sites, list) or len(sites) != 224:
         raise ValueError("language campaign must contain the 32 x 7 site census")
-    if not isinstance(contexts, list) or len(contexts) != 150:
-        raise ValueError("language campaign must contain 150 contexts")
+    expected_contexts = int(manifest.get("counts", {}).get("contexts", -1))
+    if not isinstance(contexts, list) or len(contexts) != expected_contexts:
+        raise ValueError("language campaign contexts disagree with its frozen count")
+    if manifest.get("schema_version") == 1 and len(contexts) != 150:
+        raise ValueError("version 1 language campaign must contain 150 contexts")
+    counts = manifest.get("counts", {})
+    trajectories_per_task = int(
+        counts.get("trajectories_per_task", TRAJECTORIES_PER_TASK)
+    )
+    development_per_task = int(
+        counts.get(
+            "development_trajectories_per_task",
+            DEVELOPMENT_TRAJECTORIES_PER_TASK,
+        )
+    )
+    trajectories = manifest.get("clean_trajectories")
+    if not isinstance(trajectories, list) or len(trajectories) != 10 * trajectories_per_task:
+        raise ValueError("language campaign has the wrong balanced trajectory count")
+    trajectories_by_task = Counter(int(value["task_id"]) for value in trajectories)
+    if trajectories_by_task != Counter({task: trajectories_per_task for task in range(10)}):
+        raise ValueError("language campaign trajectories are not balanced by task")
     keys = {
         (int(site["layer_index"]), int(site["action_token_position"]))
         for site in sites
@@ -295,3 +400,38 @@ def validate_language_campaign_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("a trajectory appears in both analysis splits")
     if any(len(workers) != 1 for workers in workers_by_trajectory.values()):
         raise ValueError("a trajectory is split across workers")
+    context_counts = Counter(
+        (int(value["task_id"]), int(value["episode_index"])) for value in contexts
+    )
+    if set(context_counts) != set(trajectories_by_split) or any(
+        count != len(PHASES) for count in context_counts.values()
+    ):
+        raise ValueError("each selected trajectory must contribute every declared phase")
+    for task_id in range(10):
+        task_splits = Counter(
+            str(value["analysis_split"])
+            for value in trajectories
+            if int(value["task_id"]) == task_id
+        )
+        expected_splits = Counter(
+            {
+                "development": development_per_task,
+                "holdout": trajectories_per_task - development_per_task,
+            }
+        )
+        if task_splits != expected_splits:
+            raise ValueError("language campaign analysis split is not balanced by task")
+    excluded = {
+        (int(value["task_id"]), int(value["episode_index"]))
+        for value in manifest.get("excluded_prior_trajectories", [])
+    }
+    selected = set(trajectories_by_split)
+    if selected & excluded:
+        raise ValueError("language campaign reuses an excluded prior trajectory")
+    if int(manifest.get("excluded_prior_trajectory_count", len(excluded))) != len(
+        excluded
+    ):
+        raise ValueError("excluded prior trajectory count disagrees with its records")
+    prior_paths = manifest.get("excluded_prior_manifests", [])
+    if manifest.get("schema_version") == 2 and not isinstance(prior_paths, list):
+        raise ValueError("prior manifest provenance must be a list")
