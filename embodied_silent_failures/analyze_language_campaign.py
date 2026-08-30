@@ -236,6 +236,20 @@ def _group_rows(
     return result
 
 
+def expected_context_count(score_values: list[dict[str, Any]]) -> int:
+    counts = [
+        value.get("coverage", {}).get("planned_contexts") for value in score_values
+    ]
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value <= 0
+        for value in counts
+    ):
+        raise ValueError(
+            "language score inputs must declare positive planned-context counts"
+        )
+    return sum(counts)
+
+
 def main() -> None:
     args = _arguments()
     if args.bootstrap_samples < 0:
@@ -254,8 +268,14 @@ def main() -> None:
     contexts = [item for value in score_values for item in value["contexts"]]
     records = [item for value in score_values for item in value["records"]]
     context_ids = [str(value["context_id"]) for value in contexts]
-    if len(context_ids) != 150 or len(set(context_ids)) != 150:
-        raise ValueError("combined language scores must cover 150 unique contexts")
+    expected_contexts = expected_context_count(score_values)
+    if (
+        len(context_ids) != expected_contexts
+        or len(set(context_ids)) != expected_contexts
+    ):
+        raise ValueError(
+            "combined language scores must cover every declared context exactly once"
+        )
     record_ids = [str(value["record_id"]) for value in records]
     if len(record_ids) != len(set(record_ids)):
         raise ValueError("combined language scores contain duplicate interventions")

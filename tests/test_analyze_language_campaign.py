@@ -3,6 +3,7 @@ import unittest
 from embodied_silent_failures.analyze_language_campaign import (
     analysis_row,
     clustered_rate,
+    expected_context_count,
 )
 
 
@@ -103,6 +104,14 @@ class LanguageCampaignAnalysisTests(unittest.TestCase):
         self.assertEqual(result["estimate"], 0.5)
         self.assertEqual(result["trajectory_clusters"], 2)
         self.assertEqual(result["denominator"], 4)
+
+    def test_expected_context_count_comes_from_score_coverage(self) -> None:
+        scores = [
+            {"coverage": {"planned_contexts": 105}},
+            {"coverage": {"planned_contexts": 105}},
+        ]
+
+        self.assertEqual(expected_context_count(scores), 210)
 
 
 if __name__ == "__main__":
