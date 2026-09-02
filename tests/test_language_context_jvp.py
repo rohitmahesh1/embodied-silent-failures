@@ -1,0 +1,71 @@
+import unittest
+
+from embodied_silent_failures.language_context_jvp import (
+    approximation_metrics,
+    output_names,
+    ragged_call,
+    sparse_rows,
+    sparse_value,
+)
+
+
+class LanguageContextJvpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import numpy as np
+        except ImportError as error:
+            raise unittest.SkipTest("NumPy is required") from error
+        cls.np = np
+
+    def test_ragged_call_recovers_the_requested_shape(self) -> None:
+        np = self.np
+        arrays = {
+            "clean_example_values": np.asarray([1, 2, 3, 4, 5]),
+            "clean_example_offsets": np.asarray([0, 4, 5]),
+            "clean_example_shapes": np.asarray([[2, 2], [1, 1]]),
+            "clean_example_call_indices": np.asarray([0, 3]),
+        }
+        result = ragged_call(np, arrays, "example", 3)
+        self.assertEqual(result.shape, (1, 1))
+        self.assertEqual(result.tolist(), [[5]])
+
+    def test_sparse_rows_preserve_the_full_coordinate(self) -> None:
+        np = self.np
+        arrays = {
+            "fault_values": np.asarray([[10], [20]]),
+            "fault_values_row_intervention": np.asarray([1, 0]),
+            "fault_values_row_layer": np.asarray([4, 4]),
+            "fault_values_row_token": np.asarray([2, 2]),
+        }
+        index = sparse_rows(np, arrays, "values")
+        self.assertEqual(
+            sparse_value(arrays, index, "values", 0, 4, 2).tolist(), [20]
+        )
+
+    def test_output_names_follow_recorded_attention_and_mlp_cuts(self) -> None:
+        names = output_names(30)
+        self.assertEqual(
+            names,
+            [
+                {"family": "post_attention_residual", "layer_index": 31},
+                {"family": "post_block_residual", "layer_index": 31},
+                {"family": "current_token_key", "layer_index": 31},
+                {"family": "current_token_value", "layer_index": 31},
+                {"family": "selected_token_final_feature", "layer_index": 31},
+                {"family": "selected_token_action_logits", "layer_index": None},
+            ],
+        )
+
+    def test_approximation_metrics_distinguish_direction_and_scale(self) -> None:
+        np = self.np
+        metrics = approximation_metrics(
+            np, np.asarray([1.0, 0.0]), np.asarray([2.0, 0.0])
+        )
+        self.assertAlmostEqual(metrics["normalized_error"], 1.0)
+        self.assertAlmostEqual(metrics["cosine"], 1.0)
+        self.assertAlmostEqual(metrics["norm_ratio"], 2.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
