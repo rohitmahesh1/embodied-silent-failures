@@ -107,11 +107,53 @@ class LanguageEvidenceFactorialTests(unittest.TestCase):
             result["paired_detection_rate_difference"]["estimate"], 0.0
         )
 
+    def test_zero_discordance_reports_bootstrap_limitation(self) -> None:
+        row = {
+            "task_id": 0,
+            "episode_index": 1,
+            "context_id": "c0",
+            "command_id": "a",
+            "physical_run": "run-a",
+            "shared_at_intervention": False,
+            "restored_at_intervention": False,
+            "fault_evidence_clean_action_at_intervention": False,
+            "control_at_intervention": False,
+        }
+
+        result = paired_detection_summary(
+            [row], "at_intervention", samples=10, seed=5
+        )
+
+        self.assertEqual(result["trajectories_with_any_paired_difference"], 0)
+        self.assertIsNotNone(result["zero_difference_bootstrap_limitation"])
+        self.assertAlmostEqual(
+            result["zero_difference_trajectory_probability_one_sided_95_upper"],
+            0.95,
+        )
+
     def test_score_shift_reports_trajectory_clustered_uncertainty(self) -> None:
         rows = [
-            {"task_id": 0, "episode_index": 0, "faulted_minus_clean_score": 2.0},
-            {"task_id": 0, "episode_index": 0, "faulted_minus_clean_score": 2.0},
-            {"task_id": 0, "episode_index": 1, "faulted_minus_clean_score": -1.0},
+            {
+                "task_id": 0,
+                "episode_index": 0,
+                "faulted_minus_clean_score": 2.0,
+                "clean_score_at_intervention": 1.0,
+                "threshold_at_intervention": 5.0,
+            },
+            {
+                "task_id": 0,
+                "episode_index": 0,
+                "faulted_minus_clean_score": 2.0,
+                "clean_score_at_intervention": 1.0,
+                "threshold_at_intervention": 5.0,
+            },
+            {
+                "task_id": 0,
+                "episode_index": 1,
+                "faulted_minus_clean_score": -1.0,
+                "clean_score_at_intervention": 1.0,
+                "threshold_at_intervention": 5.0,
+            },
         ]
 
         result = score_shift_summary(rows, samples=100, seed=7)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from collections import defaultdict
 from typing import Any, Callable
@@ -197,11 +198,34 @@ def paired_detection_summary(
     clean_action_difference = lambda row: float(
         int(row[clean_faulted_field]) - int(row[control_field])
     )
+    by_physical_run: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_trajectory: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("physical_run"):
+            by_physical_run[str(row["physical_run"])].append(row)
+        by_trajectory[_trajectory_key(row)].append(row)
+    discordant_trajectories = sum(
+        any(value[restored_field] != value[shared_field] for value in group)
+        for group in by_trajectory.values()
+    )
+    zero_discordance_upper = (
+        1 - math.pow(0.05, 1 / len(by_trajectory))
+        if by_trajectory and discordant_trajectories == 0
+        else None
+    )
     return {
         "interventions": len(rows),
         "trajectories": len({_trajectory_key(row) for row in rows}),
         "physical_continuations": len(
             {str(row["physical_run"]) for row in rows if row.get("physical_run")}
+        ),
+        "physical_continuations_detected_with_shared_evidence": sum(
+            any(value[shared_field] for value in group)
+            for group in by_physical_run.values()
+        ),
+        "physical_continuations_with_mixed_layer_detections": sum(
+            len({bool(value[shared_field]) for value in group}) > 1
+            for group in by_physical_run.values()
         ),
         "shared_evidence_detected": sum(bool(row[shared_field]) for row in rows),
         "clean_evidence_restored_detected": sum(
@@ -230,6 +254,16 @@ def paired_detection_summary(
         "paired_detection_rate_difference": clustered_mean(
             rows, difference, samples=samples, seed=seed
         ),
+        "trajectories_with_any_paired_difference": discordant_trajectories,
+        "zero_difference_trajectory_probability_one_sided_95_upper": (
+            zero_discordance_upper
+        ),
+        "zero_difference_bootstrap_limitation": (
+            "The percentile bootstrap is degenerate when every observed paired "
+            "difference is zero; it does not prove the population effect is zero."
+            if rows and not any(difference(row) for row in rows)
+            else None
+        ),
         "clean_action_detection_rate_difference": clustered_mean(
             rows, clean_action_difference, samples=samples, seed=seed + 10_000
         ),
@@ -255,6 +289,18 @@ def score_shift_summary(
         samples=samples,
         seed=seed,
     )
+    positive_gaps = [
+        (
+            float(row["threshold_at_intervention"])
+            - float(row["clean_score_at_intervention"]),
+            abs(float(row["faulted_minus_clean_score"])),
+        )
+        for row in rows
+        if float(row["threshold_at_intervention"])
+        > float(row["clean_score_at_intervention"])
+    ]
+    relative_shifts = [shift / gap for gap, shift in positive_gaps]
+    gaps = [gap for gap, _shift in positive_gaps]
     return {
         "interventions": len(rows),
         "mean": sum(values) / len(values),
@@ -270,4 +316,23 @@ def score_shift_summary(
         ],
         "trajectory_clusters": clustered["trajectory_clusters"],
         "bootstrap_samples": samples,
+        "clean_score_gap_below_threshold": {
+            "n": len(gaps),
+            "minimum": min(gaps) if gaps else None,
+            "median": _percentile(gaps, 0.5) if gaps else None,
+            "maximum": max(gaps) if gaps else None,
+        },
+        "absolute_shift_over_clean_threshold_gap": {
+            "n": len(relative_shifts),
+            "median": _percentile(relative_shifts, 0.5)
+            if relative_shifts
+            else None,
+            "q25": _percentile(relative_shifts, 0.25)
+            if relative_shifts
+            else None,
+            "q75": _percentile(relative_shifts, 0.75)
+            if relative_shifts
+            else None,
+            "maximum": max(relative_shifts) if relative_shifts else None,
+        },
     }
