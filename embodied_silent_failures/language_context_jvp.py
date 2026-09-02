@@ -199,6 +199,15 @@ def perturbation_summary(torch: Any, value: Any) -> dict[str, Any]:
     }
 
 
+def scaled_source(torch: Any, clean: Any, fault: Any, scale: float) -> Any:
+    """Realize a finite interpolation in the dtype consumed by the model."""
+    if not 0.0 < scale <= 1.0:
+        raise ValueError("perturbation scale must be greater than zero and at most one")
+    if scale == 1.0:
+        return fault.clone()
+    return torch.lerp(clean.float(), fault.float(), scale).to(dtype=clean.dtype)
+
+
 def decoder_modules(model: Any) -> tuple[Any, Any, Any]:
     language_model = model.language_model
     layers = language_model.model.layers
@@ -506,6 +515,8 @@ def analyze_intervention(
     indices: dict[str, dict[tuple[int, int, int], int]],
     source_layer: int,
     token: int,
+    *,
+    scales: tuple[float, ...] | None = None,
 ) -> dict[str, Any]:
     layers, final_norm, lm_head = decoder_modules(model)
     interventions = np.flatnonzero(arrays["fault_layer"] == source_layer)
@@ -554,6 +565,22 @@ def analyze_intervention(
         final_norm=final_norm,
         device=device,
     )
+
+    if scales is not None:
+        return _analyze_scale_sweep(
+            np,
+            torch,
+            clean_source=clean_source,
+            fault_source=fault_source,
+            path=path,
+            names=names,
+            clean_expected=clean_expected,
+            fault_expected=fault_expected,
+            source_reconstruction=source_reconstruction,
+            source_layer=source_layer,
+            token=token,
+            scales=scales,
+        )
 
     # Pearlmutter's JVP computes the chain-rule product through the existing
     # network at the clean state. It is a first-order prediction of the finite
@@ -639,4 +666,116 @@ def analyze_intervention(
             "prediction_matches_fault": predicted_token == fault_token,
         },
         "outputs": records,
+    }
+
+
+def _analyze_scale_sweep(
+    np: Any,
+    torch: Any,
+    *,
+    clean_source: Any,
+    fault_source: Any,
+    path: Any,
+    names: list[dict[str, Any]],
+    clean_expected: tuple[Any, ...],
+    fault_expected: tuple[Any, ...],
+    source_reconstruction: dict[str, Any],
+    source_layer: int,
+    token: int,
+    scales: tuple[float, ...],
+) -> dict[str, Any]:
+    full_delta = fault_source - clean_source
+    full_summary = perturbation_summary(torch, full_delta)
+    scale_records = []
+    clean_reconstruction_valid = source_reconstruction["exact_equal"]
+    full_fault_reconstruction_valid = None
+
+    for scale in scales:
+        source = scaled_source(torch, clean_source, fault_source, scale)
+        realized_delta = source - clean_source
+
+        # A first-order Taylor prediction must use the displacement that reaches
+        # the pinned BF16 model. Recomputing the JVP for each realized direction
+        # prevents interpolation rounding from being counted as model curvature.
+        primal, tangent = torch.autograd.functional.jvp(
+            path,
+            clean_source,
+            realized_delta,
+            create_graph=False,
+            strict=True,
+        )
+        with torch.no_grad():
+            replayed = path(source)
+
+        outputs = []
+        for name, clean, actual, replayed_clean, estimate in zip(
+            names,
+            clean_expected,
+            replayed,
+            primal,
+            tangent,
+            strict=True,
+        ):
+            clean_check = reconstruction_metrics(torch, clean, replayed_clean)
+            clean_reconstruction_valid = bool(
+                clean_reconstruction_valid and clean_check["exact_equal"]
+            )
+            actual_delta = (actual.float() - clean.float()).detach().cpu().numpy()
+            predicted_delta = estimate.float().detach().cpu().numpy()
+            outputs.append(
+                {
+                    **name,
+                    "clean_reconstruction": clean_check,
+                    "first_order": approximation_metrics(
+                        np, actual_delta, predicted_delta
+                    ),
+                }
+            )
+
+        full_fault_checks = None
+        if scale == 1.0:
+            full_fault_checks = [
+                reconstruction_metrics(torch, expected, actual)
+                for expected, actual in zip(fault_expected, replayed, strict=True)
+            ]
+            full_fault_reconstruction_valid = bool(
+                torch.equal(source, fault_source)
+                and all(check["exact_equal"] for check in full_fault_checks)
+            )
+
+        realized_summary = perturbation_summary(torch, realized_delta)
+        scale_records.append(
+            {
+                "requested_scale": scale,
+                "realized_source_perturbation": realized_summary,
+                "realized_l2_fraction": (
+                    realized_summary["l2"] / full_summary["l2"]
+                    if full_summary["l2"]
+                    else None
+                ),
+                "full_fault_reconstruction": full_fault_checks,
+                "outputs": outputs,
+            }
+        )
+
+    reconstruction_valid = bool(
+        clean_reconstruction_valid
+        and full_fault_reconstruction_valid is not False
+    )
+    return {
+        "schema_version": 2,
+        "status": "complete",
+        "analysis": "finite_perturbation_scale_sweep",
+        "source_layer": source_layer,
+        "action_token_position": token,
+        "path_blocks": LANGUAGE_BLOCK_COUNT - source_layer - 1,
+        "method": (
+            "clean-state Jacobian-vector product for each realized BF16 displacement"
+        ),
+        "reconstruction_valid": reconstruction_valid,
+        "clean_reconstruction_valid": clean_reconstruction_valid,
+        "full_fault_reconstruction_valid": full_fault_reconstruction_valid,
+        "source_reconstruction": source_reconstruction,
+        "full_source_perturbation": full_summary,
+        "scales": scale_records,
     }

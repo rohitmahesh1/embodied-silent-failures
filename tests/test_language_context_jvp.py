@@ -5,6 +5,7 @@ from embodied_silent_failures.language_context_jvp import (
     clean_full_prompt_states,
     output_names,
     ragged_call,
+    scaled_source,
     sparse_rows,
     sparse_value,
 )
@@ -86,6 +87,31 @@ class LanguageContextJvpTests(unittest.TestCase):
         states = clean_full_prompt_states(torch, [Layer(), Layer()], context)
         self.assertEqual([tuple(value.shape) for value in states], [(1, 3, 4)] * 2)
         self.assertTrue(torch.equal(states[-1], torch.full((1, 3, 4), 2.0)))
+
+    def test_scaled_source_records_the_realized_low_precision_step(self) -> None:
+        try:
+            torch = __import__("torch")
+        except ImportError as error:
+            raise unittest.SkipTest("PyTorch is required") from error
+
+        clean = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+        fault = torch.tensor([2.0, 4.0], dtype=torch.bfloat16)
+        halfway = scaled_source(torch, clean, fault, 0.5)
+        self.assertEqual(halfway.dtype, torch.bfloat16)
+        self.assertTrue(
+            torch.equal(halfway, torch.tensor([1.5, 3.0], dtype=torch.bfloat16))
+        )
+        self.assertTrue(torch.equal(scaled_source(torch, clean, fault, 1.0), fault))
+
+    def test_scaled_source_rejects_extrapolation(self) -> None:
+        try:
+            torch = __import__("torch")
+        except ImportError as error:
+            raise unittest.SkipTest("PyTorch is required") from error
+
+        value = torch.ones(2, dtype=torch.bfloat16)
+        with self.assertRaises(ValueError):
+            scaled_source(torch, value, value, 1.5)
 
 
 if __name__ == "__main__":

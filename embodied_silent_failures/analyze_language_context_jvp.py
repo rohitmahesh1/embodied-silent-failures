@@ -55,6 +55,16 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--context-id", action="append", default=[])
     parser.add_argument("--source-layer", action="append", type=int, default=[])
+    parser.add_argument(
+        "--scale",
+        action="append",
+        type=float,
+        default=[],
+        help=(
+            "Repeat to compare finite perturbation scales. Scaled sources are "
+            "rounded to BF16 before replay and differentiation."
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -95,29 +105,40 @@ def _context_source(
 
 def _run_identity(args: argparse.Namespace, contexts: list[dict[str, Any]]) -> dict[str, Any]:
     project_root = Path(__file__).resolve().parents[1]
+    method = {
+        "linearization_point": "each clean context",
+        "perturbation": "the complete finite t-1 post-block residual replacement",
+        "operator": "PyTorch reverse-over-reverse Jacobian-vector product",
+        "factorization": (
+            "pinned Llama attention and MLP residual sublayers, followed by "
+            "the final norm and language-model head"
+        ),
+        "scope": (
+            "continuous propagation within the selected action-token call; "
+            "autoregressive token selection is an explicit discrete boundary"
+        ),
+        "execution_shape": (
+            "generation call zero preserves the complete fused prompt sequence; "
+            "calls one through six preserve their original one-token shape"
+        ),
+    }
+    analysis = "openvla_context_conditioned_jvp"
+    if args.scale:
+        analysis = "openvla_context_conditioned_jvp_scale_sweep"
+        method["finite_scale_sweep"] = {
+            "requested_scales": args.scale,
+            "source_realization": (
+                "interpolate in float32, round once to the model's BF16 input, "
+                "and differentiate along that realized displacement"
+            ),
+        }
     return {
         "schema_version": 1,
-        "analysis": "openvla_context_conditioned_jvp",
+        "analysis": analysis,
         "analysis_split": args.analysis_split,
         "context_ids": [str(context["context_id"]) for context in contexts],
         "source_layers": args.source_layer or list(range(32)),
-        "method": {
-            "linearization_point": "each clean context",
-            "perturbation": "the complete finite t-1 post-block residual replacement",
-            "operator": "PyTorch reverse-over-reverse Jacobian-vector product",
-            "factorization": (
-                "pinned Llama attention and MLP residual sublayers, followed by "
-                "the final norm and language-model head"
-            ),
-            "scope": (
-                "continuous propagation within the selected action-token call; "
-                "autoregressive token selection is an explicit discrete boundary"
-            ),
-            "execution_shape": (
-                "generation call zero preserves the complete fused prompt sequence; "
-                "calls one through six preserve their original one-token shape"
-            ),
-        },
+        "method": method,
         "code": git_state(project_root),
         "manifest": {
             "path": str(args.manifest.resolve()),
@@ -150,6 +171,10 @@ def main() -> None:
         raise ValueError("holdout analysis requires a frozen design record")
     if args.frozen_design is not None and not args.frozen_design.is_file():
         raise FileNotFoundError(f"frozen design is missing: {args.frozen_design}")
+    if any(not 0.0 < scale <= 1.0 for scale in args.scale):
+        raise ValueError("perturbation scales must be greater than zero and at most one")
+    if len(set(args.scale)) != len(args.scale):
+        raise ValueError("perturbation scales must be unique")
     source_layers = args.source_layer or list(range(32))
     if len(set(source_layers)) != len(source_layers) or any(
         layer < 0 or layer >= 32 for layer in source_layers
@@ -261,6 +286,7 @@ def main() -> None:
                         indices,
                         source_layer,
                         token,
+                        scales=tuple(args.scale) or None,
                     )
                     result.update(
                         {
