@@ -16,6 +16,11 @@ from embodied_silent_failures.language_evidence_factorial import (
 from embodied_silent_failures.provenance import file_sha256, git_state, load_json
 
 
+FROZEN_SAFE_CONFIG_SHA256 = (
+    "2b447944d0218278c47918777dbf5777b5cf29a207a73231e89161abd9dcd4c6"
+)
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -23,6 +28,7 @@ def _arguments() -> argparse.Namespace:
         )
     )
     parser.add_argument("--score-dir", action="append", required=True, type=Path)
+    parser.add_argument("--monitor-config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--records-csv", required=True, type=Path)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
@@ -168,7 +174,8 @@ def _record(
     if reasons:
         return base
 
-    cells = factorial_cells(np, natural, control, band, step)
+    factorial = factorial_cells(np, natural, control, band, step)
+    cells = factorial["cells"]
     natural_score = cells["faulted_action_faulted_evidence"][
         "score_at_intervention"
     ]
@@ -200,10 +207,18 @@ def _record(
             "alarm_before_intervention": shared_before,
             "clean_score_at_intervention": control_score,
             "faulted_score_at_intervention": natural_score,
+            "clean_evidence_contribution": factorial["evidence_contribution"][
+                "clean"
+            ],
+            "faulted_evidence_contribution": factorial["evidence_contribution"][
+                "faulted"
+            ],
             "threshold_at_intervention": cells[
                 "faulted_action_faulted_evidence"
             ]["threshold_at_intervention"],
-            "faulted_minus_clean_score": natural_score - control_score,
+            "faulted_minus_clean_score": factorial["evidence_contribution"][
+                "faulted_minus_clean"
+            ],
             "cells": cells,
         }
     )
@@ -300,6 +315,9 @@ def main() -> None:
         raise ValueError("bootstrap sample count cannot be negative")
     if len(set(args.score_dir)) != len(args.score_dir):
         raise ValueError("score directories must be unique")
+    monitor_config_sha256 = file_sha256(args.monitor_config)
+    if monitor_config_sha256 != FROZEN_SAFE_CONFIG_SHA256:
+        raise ValueError("factorial requires the pinned cumulative SAFE-MLP config")
 
     import numpy as np
 
@@ -309,6 +327,12 @@ def main() -> None:
     }
     if len(monitor_hashes) != 1:
         raise ValueError("workers used different frozen SAFE checkpoints")
+    if any(
+        worker["language"]["monitor"]["configuration_sha256"]
+        != monitor_config_sha256
+        for worker in workers
+    ):
+        raise ValueError("score workers cite a different SAFE configuration")
     first = workers[0]
     for worker in workers[1:]:
         if not np.array_equal(worker["alphas"], first["alphas"]) or not np.array_equal(
@@ -391,14 +415,23 @@ def main() -> None:
             ),
             "why_score_swapping_is_exact": (
                 "SAFE commit b6036abe uses the frozen indep/MLP monitor, which "
-                "scores each policy step independently. score_language_campaign.py "
-                "already records the faulted physical continuation with each "
-                "layer-specific intervention score."
+                "projects each n_history_steps=1 feature independently and then "
+                "cumulatively sums those contributions. Replacing one feature "
+                "therefore shifts the complete cumulative-score suffix by that "
+                "contribution difference. score_language_campaign.py already "
+                "records the faulted physical continuation with each layer-specific "
+                "intervention contribution."
             ),
         },
         "code": git_state(project_root),
         "monitor": first["language"]["monitor"],
-        "inputs": [artifact for worker in workers for artifact in worker["artifacts"]],
+        "inputs": [
+            *[artifact for worker in workers for artifact in worker["artifacts"]],
+            {
+                "path": str(args.monitor_config.resolve()),
+                "sha256": monitor_config_sha256,
+            },
+        ],
         "coverage": {
             "records": len(rows),
             "audit_valid": sum(row["audit_valid"] for row in rows),

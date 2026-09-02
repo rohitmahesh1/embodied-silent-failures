@@ -65,8 +65,8 @@ def factorial_cells(
     control_scores: Any,
     band: Any,
     step: int,
-) -> dict[str, dict[str, Any]]:
-    """Swap one SAFE-MLP score while preserving each physical continuation."""
+) -> dict[str, Any]:
+    """Swap one SAFE-MLP contribution in its cumulative score trace."""
     natural = np.asarray(natural_scores, dtype=np.float32)
     control = np.asarray(control_scores, dtype=np.float32)
     if natural.ndim != 1 or control.ndim != 1:
@@ -76,10 +76,20 @@ def factorial_cells(
     if not np.isfinite(natural).all() or not np.isfinite(control).all():
         raise ValueError("factorial inputs contain non-finite SAFE scores")
 
-    faulted_action_clean_evidence = natural.copy()
-    faulted_action_clean_evidence[step] = control[step]
-    clean_action_faulted_evidence = control.copy()
-    clean_action_faulted_evidence[step] = natural[step]
+    clean_previous = float(control[step - 1]) if step else 0.0
+    faulted_previous = float(natural[step - 1]) if step else 0.0
+    clean_contribution = float(control[step]) - clean_previous
+    faulted_contribution = float(natural[step]) - faulted_previous
+    contribution_change = faulted_contribution - clean_contribution
+
+    # SAFE b6036abe, failure_prob/model/indep.py::IndepModel.forward,
+    # projects each n_history_steps=1 feature independently and then applies
+    # torch.cumsum when the frozen config has cumsum=true, rmean=false. Swapping
+    # one feature therefore shifts every cumulative score from this step onward.
+    faulted_action_clean_evidence = natural.astype(np.float64)
+    faulted_action_clean_evidence[step:] -= contribution_change
+    clean_action_faulted_evidence = control.astype(np.float64)
+    clean_action_faulted_evidence[step:] += contribution_change
     traces = {
         "clean_action_clean_evidence": control,
         "clean_action_faulted_evidence": clean_action_faulted_evidence,
@@ -87,8 +97,15 @@ def factorial_cells(
         "faulted_action_faulted_evidence": natural,
     }
     return {
-        name: alarm_summary(np, scores, band, step)
-        for name, scores in traces.items()
+        "cells": {
+            name: alarm_summary(np, scores, band, step)
+            for name, scores in traces.items()
+        },
+        "evidence_contribution": {
+            "clean": clean_contribution,
+            "faulted": faulted_contribution,
+            "faulted_minus_clean": contribution_change,
+        },
     }
 
 

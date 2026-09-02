@@ -15,7 +15,8 @@ class LanguageEvidenceFactorialTests(unittest.TestCase):
         control = np.asarray([0.1, 0.2, 0.1, 0.1], dtype=np.float32)
         natural = np.asarray([0.1, 0.8, 0.1, 0.1], dtype=np.float32)
 
-        cells = factorial_cells(np, natural, control, band, 1)
+        result = factorial_cells(np, natural, control, band, 1)
+        cells = result["cells"]
 
         self.assertTrue(
             cells["faulted_action_faulted_evidence"]["alarms"]
@@ -24,6 +25,9 @@ class LanguageEvidenceFactorialTests(unittest.TestCase):
         self.assertFalse(
             cells["faulted_action_clean_evidence"]["alarms"]
             ["at_intervention"]["triggered"]
+        )
+        self.assertAlmostEqual(
+            result["evidence_contribution"]["faulted_minus_clean"], 0.6
         )
         self.assertTrue(
             cells["clean_action_faulted_evidence"]["alarms"]
@@ -39,7 +43,7 @@ class LanguageEvidenceFactorialTests(unittest.TestCase):
         control = np.asarray([0.1, 0.8, 0.1], dtype=np.float32)
         natural = np.asarray([0.1, 0.2, 0.1], dtype=np.float32)
 
-        cells = factorial_cells(np, natural, control, band, 1)
+        cells = factorial_cells(np, natural, control, band, 1)["cells"]
 
         self.assertFalse(
             cells["faulted_action_faulted_evidence"]["alarms"]
@@ -48,6 +52,22 @@ class LanguageEvidenceFactorialTests(unittest.TestCase):
         self.assertTrue(
             cells["faulted_action_clean_evidence"]["alarms"]
             ["at_intervention"]["triggered"]
+        )
+
+    def test_cumulative_contribution_changes_later_scores(self) -> None:
+        band = np.asarray([1.0, 0.5, 0.5], dtype=np.float32)
+        control = np.asarray([0.1, 0.2, 0.4], dtype=np.float32)
+        natural = np.asarray([0.1, 0.3, 0.45], dtype=np.float32)
+
+        cells = factorial_cells(np, natural, control, band, 1)["cells"]
+
+        self.assertFalse(
+            cells["clean_action_clean_evidence"]["alarms"]
+            ["post_fault_any"]["triggered"]
+        )
+        self.assertTrue(
+            cells["clean_action_faulted_evidence"]["alarms"]
+            ["post_fault_any"]["triggered"]
         )
 
     def test_paired_summary_counts_both_discordant_directions(self) -> None:
