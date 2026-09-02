@@ -53,6 +53,7 @@ _ARCHIVE_ARRAYS = {
     "clean_decoder_attention_mask_present",
     "clean_prompt_cache_keys",
     "clean_prompt_cache_values",
+    "clean_initial_language_input",
 }
 
 
@@ -223,6 +224,11 @@ def context_tensors(
     prompt_values = decode_bfloat16(
         torch, arrays["clean_prompt_cache_values"], device
     )
+    initial_language_input = (
+        decode_bfloat16(torch, arrays["clean_initial_language_input"], device)
+        if token == 0
+        else None
+    )
     current_keys = decode_bfloat16(
         torch, arrays["clean_attention_cache_keys"], device
     )
@@ -263,31 +269,64 @@ def context_tensors(
         keys.append(key)
         values.append(value)
 
-    position_ids = torch.from_numpy(
+    full_position_ids = torch.from_numpy(
         ragged_call(np, arrays, "decoder_position_ids", token).copy()
     ).to(device)
-    cache_position = torch.from_numpy(
+    full_cache_position = torch.from_numpy(
         ragged_call(np, arrays, "decoder_cache_position", token).copy()
     ).to(device)
-    position_ids = position_ids[:, -1:]
-    cache_position = cache_position[-1:]
+    position_ids = full_position_ids[:, -1:]
+    cache_position = full_cache_position[-1:]
 
-    attention_mask = None
+    full_attention_mask = None
     if bool(arrays["clean_decoder_attention_mask_present"][token]):
-        attention_mask = torch.from_numpy(
+        full_attention_mask = torch.from_numpy(
             ragged_call(np, arrays, "decoder_attention_mask", token).copy()
         ).to(device)
+    attention_mask = full_attention_mask
+    if attention_mask is not None:
         if attention_mask.ndim >= 3:
             attention_mask = attention_mask[..., -1:, :]
     return {
+        "action_token_position": token,
         "prefix_keys": tuple(keys),
         "prefix_values": tuple(values),
+        "prompt_keys": tuple(prompt_keys),
+        "prompt_values": tuple(prompt_values),
         "position_ids": position_ids,
         "cache_position": cache_position,
         "attention_mask": attention_mask,
+        "full_position_ids": full_position_ids,
+        "full_cache_position": full_cache_position,
+        "full_attention_mask": full_attention_mask,
+        "initial_language_input": initial_language_input,
         "clean_current_keys": current_keys,
         "clean_current_values": current_values,
     }
+
+
+def clean_full_prompt_states(
+    torch: Any, layers: Any, context: dict[str, Any]
+) -> tuple[Any, ...]:
+    """Replay call zero with its original full-sequence tensor shapes."""
+    from transformers.cache_utils import DynamicCache
+
+    hidden = context["initial_language_input"]
+    cache = DynamicCache()
+    states = []
+    with torch.no_grad():
+        for layer in layers:
+            hidden = layer(
+                hidden_states=hidden,
+                attention_mask=context["full_attention_mask"],
+                position_ids=context["full_position_ids"],
+                past_key_value=cache,
+                output_attentions=False,
+                use_cache=True,
+                cache_position=context["full_cache_position"],
+            )[0]
+            states.append(hidden.detach())
+    return tuple(states)
 
 
 def decoder_path(
@@ -300,10 +339,29 @@ def decoder_path(
 ) -> Any:
     from transformers.cache_utils import DynamicCache
 
+    full_prompt_states = context.get("full_prompt_states")
+    use_full_prompt = context["action_token_position"] == 0
+    if use_full_prompt and full_prompt_states is None:
+        raise ValueError("token-zero replay requires full prompt states")
+
     def path(hidden: Any) -> tuple[Any, ...]:
         cache = DynamicCache()
-        cache.key_cache = list(context["prefix_keys"])
-        cache.value_cache = list(context["prefix_values"])
+        if use_full_prompt:
+            source_state = full_prompt_states[source_layer]
+            if tuple(hidden.shape) != (1, 1, HIDDEN_SIZE):
+                raise ValueError("token-zero source vector has an unexpected shape")
+            hidden = torch.cat((source_state[:, :-1, :], hidden), dim=1)
+            cache.key_cache = list(context["prompt_keys"][: source_layer + 1])
+            cache.value_cache = list(context["prompt_values"][: source_layer + 1])
+            position_ids = context["full_position_ids"]
+            cache_position = context["full_cache_position"]
+            attention_mask = context["full_attention_mask"]
+        else:
+            cache.key_cache = list(context["prefix_keys"])
+            cache.value_cache = list(context["prefix_values"])
+            position_ids = context["position_ids"]
+            cache_position = context["cache_position"]
+            attention_mask = context["attention_mask"]
         cache._seen_tokens = int(cache.key_cache[0].shape[-2])
         outputs = []
         for layer_index in range(source_layer + 1, LANGUAGE_BLOCK_COUNT):
@@ -317,12 +375,12 @@ def decoder_path(
             normalized = layer.input_layernorm(hidden)
             attention, _weights, _cache = layer.self_attn(
                 hidden_states=normalized,
-                attention_mask=context["attention_mask"],
-                position_ids=context["position_ids"],
+                attention_mask=attention_mask,
+                position_ids=position_ids,
                 past_key_value=cache,
                 output_attentions=False,
                 use_cache=True,
-                cache_position=context["cache_position"],
+                cache_position=cache_position,
             )
             post_attention = residual + attention
             hidden = post_attention + layer.mlp(
@@ -330,15 +388,15 @@ def decoder_path(
             )
             outputs.extend(
                 (
-                    post_attention,
-                    hidden,
+                    post_attention[:, -1:, :],
+                    hidden[:, -1:, :],
                     cache.key_cache[layer_index][..., -1:, :],
                     cache.value_cache[layer_index][..., -1:, :],
                 )
             )
         feature = final_norm(hidden)
         logits = lm_head(feature)[..., -ACTION_VOCABULARY_SIZE:]
-        return (*outputs, feature, logits)
+        return (*outputs, feature[:, -1:, :], logits[:, -1:, :])
 
     return path
 
@@ -461,6 +519,15 @@ def analyze_intervention(
     fault_source = decode_bfloat16(
         torch, arrays["source_residuals"][source_layer, token], device
     ).reshape(1, 1, HIDDEN_SIZE)
+    source_reconstruction = (
+        reconstruction_metrics(
+            torch,
+            clean_source,
+            context["full_prompt_states"][source_layer][:, -1:, :],
+        )
+        if token == 0
+        else reconstruction_metrics(torch, clean_source, clean_source)
+    )
     path = decoder_path(
         torch, layers, final_norm, lm_head, context, source_layer
     )
@@ -502,7 +569,7 @@ def analyze_intervention(
         fault_replay = path(fault_source)
 
     records = []
-    reconstruction_valid = True
+    reconstruction_valid = source_reconstruction["exact_equal"]
     for name, clean, fault, replayed_clean, replayed_fault, estimate in zip(
         names,
         clean_expected,
@@ -556,6 +623,7 @@ def analyze_intervention(
             "reverse-over-reverse Jacobian-vector product at the clean execution"
         ),
         "reconstruction_valid": reconstruction_valid,
+        "source_reconstruction": source_reconstruction,
         "source_perturbation": perturbation_summary(
             torch, fault_source - clean_source
         ),

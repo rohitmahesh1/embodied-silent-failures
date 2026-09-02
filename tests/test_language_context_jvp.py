@@ -2,6 +2,7 @@ import unittest
 
 from embodied_silent_failures.language_context_jvp import (
     approximation_metrics,
+    clean_full_prompt_states,
     output_names,
     ragged_call,
     sparse_rows,
@@ -65,6 +66,26 @@ class LanguageContextJvpTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["normalized_error"], 1.0)
         self.assertAlmostEqual(metrics["cosine"], 1.0)
         self.assertAlmostEqual(metrics["norm_ratio"], 2.0)
+
+    def test_clean_full_prompt_states_preserve_full_sequence(self) -> None:
+        try:
+            torch = __import__("torch")
+        except ImportError as error:
+            raise unittest.SkipTest("PyTorch is required") from error
+
+        class Layer(torch.nn.Module):
+            def forward(self, hidden_states, **_kwargs):
+                return (hidden_states + 1,)
+
+        context = {
+            "initial_language_input": torch.zeros((1, 3, 4)),
+            "full_attention_mask": None,
+            "full_position_ids": torch.arange(3).reshape(1, 3),
+            "full_cache_position": torch.arange(3),
+        }
+        states = clean_full_prompt_states(torch, [Layer(), Layer()], context)
+        self.assertEqual([tuple(value.shape) for value in states], [(1, 3, 4)] * 2)
+        self.assertTrue(torch.equal(states[-1], torch.full((1, 3, 4), 2.0)))
 
 
 if __name__ == "__main__":

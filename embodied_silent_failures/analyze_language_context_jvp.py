@@ -14,6 +14,7 @@ from typing import Any
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.language_context_jvp import (
     analyze_intervention,
+    clean_full_prompt_states,
     context_tensors,
     load_context_arrays,
     sparse_rows,
@@ -111,6 +112,10 @@ def _run_identity(args: argparse.Namespace, contexts: list[dict[str, Any]]) -> d
             "scope": (
                 "continuous propagation within the selected action-token call; "
                 "autoregressive token selection is an explicit discrete boundary"
+            ),
+            "execution_shape": (
+                "generation call zero preserves the complete fused prompt sequence; "
+                "calls one through six preserve their original one-token shape"
             ),
         },
         "code": git_state(project_root),
@@ -226,6 +231,11 @@ def main() -> None:
                 token,
                 next(model.parameters()).device,
             )
+            if token == 0:
+                layers = model.language_model.model.layers
+                tensor_context["full_prompt_states"] = clean_full_prompt_states(
+                    runtime.torch, layers, tensor_context
+                )
             indices = {
                 name: sparse_rows(runtime.np, arrays, name)
                 for name in (
