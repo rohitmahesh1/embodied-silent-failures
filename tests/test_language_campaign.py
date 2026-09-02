@@ -1,11 +1,16 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from embodied_silent_failures.language_campaign import (
     CACHE_AWARE_BOUNDARY_STATE,
     CACHE_REPLAY_STORAGE,
+    CONTEXT_INTERFACE_PORTS,
     build_contexts,
     language_block_sites,
     select_clean_trajectories,
+    trajectory_keys_from_manifests,
     validate_language_campaign_manifest,
 )
 
@@ -148,6 +153,25 @@ class LanguageCampaignTests(unittest.TestCase):
                 1,
             )
 
+    def test_prior_manifest_exclusion_is_transitive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prior.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "clean_trajectories": [{"task_id": 1, "episode_index": 2}],
+                        "excluded_prior_trajectories": [
+                            {"task_id": 3, "episode_index": 4}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                trajectory_keys_from_manifests([path]), {(1, 2), (3, 4)}
+            )
+
     def test_full_interface_manifest_requires_exact_cache_replay(self) -> None:
         instrumentation = {
             "full_language_interfaces": True,
@@ -163,6 +187,22 @@ class LanguageCampaignTests(unittest.TestCase):
         incomplete = {**instrumentation, "language_ports": []}
         with self.assertRaises(ValueError):
             validate_language_campaign_manifest(self._manifest(incomplete))
+
+    def test_context_interface_manifest_freezes_local_collection(self) -> None:
+        instrumentation = {
+            "full_language_interfaces": True,
+            "context_conditioned_interfaces": True,
+            "language_ports": sorted(CONTEXT_INTERFACE_PORTS),
+            "boundary_state": CACHE_AWARE_BOUNDARY_STATE,
+            "boundary_replay_storage": CACHE_REPLAY_STORAGE,
+            "terminal_branches": False,
+        }
+
+        validate_language_campaign_manifest(self._manifest(instrumentation))
+        with self.assertRaises(ValueError):
+            validate_language_campaign_manifest(
+                self._manifest({**instrumentation, "terminal_branches": True})
+            )
 
 
 if __name__ == "__main__":

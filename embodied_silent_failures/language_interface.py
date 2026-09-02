@@ -29,6 +29,29 @@ def trace_tensor(torch: Any, decision: PolicyDecision) -> Any:
     return torch.stack(rows, dim=0).detach().cpu().contiguous()
 
 
+def internal_tensor(torch: Any, decision: PolicyDecision, field_name: str) -> Any:
+    if decision.trace is None:
+        raise ValueError("cannot read a decision without a language trace")
+    values = getattr(decision.trace, field_name)
+    rows = []
+    for layer_index in range(LANGUAGE_BLOCK_COUNT):
+        calls = values.get(layer_index, {})
+        missing = sorted(set(range(ACTION_TOKEN_COUNT)) - set(calls))
+        if missing:
+            raise ValueError(
+                f"language block {layer_index} is missing {field_name} calls {missing}"
+            )
+        layer_rows = []
+        for token in range(ACTION_TOKEN_COUNT):
+            value = calls[token]
+            if field_name == "attention_queries_by_call":
+                layer_rows.append(value[0, :, 0, :])
+            else:
+                layer_rows.append(value[0, 0, :])
+        rows.append(torch.stack(layer_rows, dim=0))
+    return torch.stack(rows, dim=0).detach().cpu().contiguous()
+
+
 def cache_tensor(torch: Any, decision: PolicyDecision, kind: str) -> Any:
     if decision.trace is None:
         raise ValueError("cannot read a decision without a language trace")
@@ -136,6 +159,20 @@ def trace_repeatability(
             module, decision, "value"
         ),
     }
+    if left.trace and left.trace.block_inputs_by_call:
+        readers.update(
+            {
+                "block_inputs": lambda module, decision: internal_tensor(
+                    module, decision, "block_inputs_by_call"
+                ),
+                "post_attention_residuals": lambda module, decision: internal_tensor(
+                    module, decision, "post_attention_residuals_by_call"
+                ),
+                "attention_queries": lambda module, decision: internal_tensor(
+                    module, decision, "attention_queries_by_call"
+                ),
+            }
+        )
     result = {}
     for name, reader in readers.items():
         left_value = reader(torch, left)
@@ -149,6 +186,36 @@ def trace_repeatability(
             "exact_coordinates": int(per_coordinate.sum().item()),
             "total_coordinates": LANGUAGE_BLOCK_COUNT * ACTION_TOKEN_COUNT,
         }
+    if left.trace and right.trace and left.trace.prompt_cache:
+        result["processed_pixel_values"] = {
+            "all_exact": bool(
+                torch.equal(
+                    left.trace.initial_pixel_values,
+                    right.trace.initial_pixel_values,
+                )
+            )
+        }
+        result["initial_language_input"] = {
+            "all_exact": bool(
+                torch.equal(
+                    left.trace.initial_language_input,
+                    right.trace.initial_language_input,
+                )
+            )
+        }
+        for kind in ("key", "value"):
+            exact_layers = sum(
+                torch.equal(
+                    left.trace.prompt_cache[layer][kind],
+                    right.trace.prompt_cache[layer][kind],
+                )
+                for layer in range(LANGUAGE_BLOCK_COUNT)
+            )
+            result[f"prompt_cache_{kind}"] = {
+                "all_exact": exact_layers == LANGUAGE_BLOCK_COUNT,
+                "exact_layers": exact_layers,
+                "total_layers": LANGUAGE_BLOCK_COUNT,
+            }
     return result
 
 

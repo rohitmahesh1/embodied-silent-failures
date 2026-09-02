@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from embodied_silent_failures.provenance import file_sha256, load_json
-from embodied_silent_failures.temporal_campaign import PHASES, clean_success_frame
+from embodied_silent_failures.temporal_campaign import (
+    PHASES,
+    clean_rollout_frame,
+)
 
 
 ACTION_TOKEN_COUNT = 7
@@ -28,6 +31,17 @@ CACHE_REPLAY_STORAGE = (
 EXACT_CACHE_PORTS = {
     "exact post-rotary current-token key cache entry",
     "exact current-token value cache entry",
+}
+CONTEXT_INTERFACE_PORTS = {
+    "exact processed model inputs",
+    "full prompt key/value cache",
+    "fused language-block-zero input",
+    "post-block final-token residual",
+    "pre-block final-token residual",
+    "post-attention final-token residual",
+    "post-rotary final-token query",
+    "complete 256-entry action-token logits",
+    *EXACT_CACHE_PORTS,
 }
 
 
@@ -146,7 +160,7 @@ def select_clean_trajectories(
                         if index < development_trajectories_per_task
                         else "holdout"
                     ),
-                    "task_success_population": len(full_population),
+                    "task_clean_population": len(full_population),
                     "excluded_prior_trajectories": len(full_population) - len(population),
                     "eligible_trajectory_population": len(population),
                     "trajectory_inclusion_probability": (
@@ -165,6 +179,12 @@ def trajectory_keys_from_manifests(paths: list[Path]) -> set[tuple[int, int]]:
         if not isinstance(trajectories, list):
             raise ValueError(f"excluded manifest has no clean trajectories: {path}")
         for value in trajectories:
+            keys.add((int(value["task_id"]), int(value["episode_index"])))
+        # A later campaign manifest records the trajectories excluded by its
+        # own pinned predecessors. Carry those concrete task/episode identities
+        # forward so a new sample is disjoint from the whole declared history,
+        # not merely from the immediately preceding sample.
+        for value in manifest.get("excluded_prior_trajectories", []):
             keys.add((int(value["task_id"]), int(value["episode_index"])))
     return keys
 
@@ -243,13 +263,18 @@ def build_language_campaign_manifest(
     development_trajectories_per_task: int = DEVELOPMENT_TRAJECTORIES_PER_TASK,
     exclude_manifest_paths: list[Path] | None = None,
     instrumentation: dict[str, Any] | None = None,
+    clean_population: str = "successes",
 ) -> dict[str, Any]:
     exclude_manifest_paths = exclude_manifest_paths or []
     table = load_json(table_path)
     sites = language_block_sites(table)
     excluded_trajectories = trajectory_keys_from_manifests(exclude_manifest_paths)
+    if clean_population not in {"successes", "all"}:
+        raise ValueError("clean population must be 'successes' or 'all'")
     trajectories = select_clean_trajectories(
-        clean_success_frame(clean_root),
+        clean_rollout_frame(
+            clean_root, successful_only=clean_population == "successes"
+        ),
         seed=seed,
         trajectories_per_task=trajectories_per_task,
         development_trajectories_per_task=development_trajectories_per_task,
@@ -294,7 +319,16 @@ def build_language_campaign_manifest(
             "site_population": "census all 32 language-block residual outputs",
             "trajectory_sampling": (
                 f"seeded uniform sample of {trajectories_per_task} eligible "
-                "clean-success trajectories per task without replacement"
+                + (
+                    "completed clean rollouts per task without replacement"
+                    if clean_population == "all"
+                    else "successful clean rollouts per task without replacement"
+                )
+            ),
+            "clean_population": (
+                "completed unperturbed rollouts, regardless of task outcome"
+                if clean_population == "all"
+                else "completed successful unperturbed rollouts"
             ),
             "prior_trajectory_exclusion": (
                 "exclude every task and episode pair named by the pinned prior manifests"
@@ -461,4 +495,15 @@ def validate_language_campaign_manifest(manifest: dict[str, Any]) -> None:
         if instrumentation.get("boundary_replay_storage") != CACHE_REPLAY_STORAGE:
             raise ValueError(
                 "full-interface campaign does not declare lossless replay storage"
+            )
+    if instrumentation.get("context_conditioned_interfaces"):
+        ports = set(instrumentation.get("language_ports", []))
+        missing = CONTEXT_INTERFACE_PORTS - ports
+        if missing:
+            raise ValueError(
+                f"context-interface campaign omits declared ports: {sorted(missing)}"
+            )
+        if instrumentation.get("terminal_branches") is not False:
+            raise ValueError(
+                "context-interface collection must explicitly defer terminal branches"
             )

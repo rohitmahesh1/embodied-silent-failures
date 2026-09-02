@@ -89,6 +89,8 @@ def policy_decision(
     sources: dict[int, Any] | None = None,
     cache_replacement_layers: frozenset[int] | None = None,
     cache_sources: dict[int, dict[str, Any]] | None = None,
+    capture_internal_state: bool = False,
+    capture_context_state: bool = False,
 ) -> PolicyDecision:
     resize_size = runtime.get_image_resize_size(policy_config)
     image = runtime.get_libero_image(observation, resize_size)
@@ -109,6 +111,8 @@ def policy_decision(
             sources=sources,
             cache_replacement_layers=cache_replacement_layers,
             cache_sources=cache_sources,
+            capture_internal_state=capture_internal_state,
+            capture_context_state=capture_context_state,
         )
         if injector is not None
         else nullcontext()

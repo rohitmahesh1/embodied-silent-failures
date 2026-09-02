@@ -195,6 +195,10 @@ def run_context(
     restore_directly = branch_state_restoration == "direct"
     instrumentation = instrumentation or {}
     interface_enabled = bool(instrumentation.get("full_language_interfaces", False))
+    context_interfaces = bool(
+        instrumentation.get("context_conditioned_interfaces", False)
+    )
+    terminal_branches = bool(instrumentation.get("terminal_branches", True))
     replay_kinds = list(instrumentation.get("boundary_replays", []))
     context_dir = output_dir / "contexts" / str(context["context_id"])
     context_dir.mkdir(parents=True, exist_ok=True)
@@ -214,6 +218,8 @@ def run_context(
         initial_state,
         context,
         wait_steps=wait_steps,
+        capture_internal_state=context_interfaces,
+        capture_context_state=context_interfaces,
     )
     captured_context_path = context_dir / "captured_context.npz"
     captured_context_archive = write_captured_context_archive(
@@ -231,6 +237,8 @@ def run_context(
         task_description,
         injector=injector,
         action_token_position=token_position,
+        capture_internal_state=context_interfaces,
+        capture_context_state=context_interfaces,
     )
     local_records = []
     candidates = []
@@ -257,6 +265,7 @@ def run_context(
                 action_token_position=token_position,
                 replacement_layer=layer_index,
                 sources=captured.source_trace.block_values,
+                capture_internal_state=context_interfaces,
             )
             record = intervention_record(
                 runtime,
@@ -295,6 +304,7 @@ def run_context(
                             },
                             cache_replacement_layers=cache_layers,
                             cache_sources=cache_sources,
+                            capture_internal_state=context_interfaces,
                         )
                         interface_archive.add_replay(
                             injection_layer=layer_index,
@@ -343,6 +353,8 @@ def run_context(
         task_description,
         injector=injector,
         action_token_position=token_position,
+        capture_internal_state=context_interfaces,
+        capture_context_state=context_interfaces,
     )
     repeated_clean_record = {
         "command_exact_equal": bool(
@@ -395,6 +407,7 @@ def run_context(
             "schema_version": 2 if interface_enabled else 1,
             "status": "complete",
             "context": context,
+            "task_description": task_description,
             "captured_simulator_state_sha256": captured.simulator_state_sha256,
             "captured_context_archive": captured_context_archive,
             "source_hook_calls": captured.source_trace.call_counts,
@@ -419,32 +432,35 @@ def run_context(
         "action_token_position": token_position,
         "branch_state_restoration": branch_state_restoration,
     }
-    control_result = _run_branch(
-        output_dir=output_dir / "attempts" / f"{context['context_id']}-control",
-        runtime=runtime,
-        policy_config=policy_config,
-        model=model,
-        processor=processor,
-        env=env,
-        task_description=task_description,
-        initial_state=initial_state,
-        context=context,
-        captured=captured,
-        decision=clean,
-        fault=control_fault,
-        execution=execution,
-        condition="activation_control",
-        wait_steps=wait_steps,
-        restore_directly=restore_directly,
-    )
-    branch_results.append({"branch": "control", "result": control_result})
-
     command_groups = _command_groups(runtime, candidates)
-    selected_groups, terminal_skip_reason = _select_terminal_groups(
-        command_groups,
-        control_result,
-        maximum_faulted_terminal_branches,
-    )
+    if terminal_branches:
+        control_result = _run_branch(
+            output_dir=output_dir / "attempts" / f"{context['context_id']}-control",
+            runtime=runtime,
+            policy_config=policy_config,
+            model=model,
+            processor=processor,
+            env=env,
+            task_description=task_description,
+            initial_state=initial_state,
+            context=context,
+            captured=captured,
+            decision=clean,
+            fault=control_fault,
+            execution=execution,
+            condition="activation_control",
+            wait_steps=wait_steps,
+            restore_directly=restore_directly,
+        )
+        branch_results.append({"branch": "control", "result": control_result})
+        selected_groups, terminal_skip_reason = _select_terminal_groups(
+            command_groups,
+            control_result,
+            maximum_faulted_terminal_branches,
+        )
+    else:
+        selected_groups = []
+        terminal_skip_reason = "disabled_by_frozen_instrumentation"
     for group in selected_groups:
         layer_index, decision, local_record = group["members"][0]
         group_record = _group_record(group)

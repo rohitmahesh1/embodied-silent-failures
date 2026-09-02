@@ -9,6 +9,7 @@ from embodied_silent_failures.language_campaign import CACHE_REPLAY_STORAGE
 from embodied_silent_failures.language_interface import (
     cache_tensor,
     downstream_coordinates,
+    internal_tensor,
     sequence_lengths,
     trace_tensor,
 )
@@ -55,6 +56,93 @@ def _generation_arrays(torch: Any, decisions: list[PolicyDecision]) -> dict[str,
             [value.generation_logits.entropy for value in decisions]
         ).numpy(),
     }
+
+
+def _ragged_calls(
+    torch: Any,
+    values: dict[int, Any],
+    name: str,
+    *,
+    require_all: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    missing = sorted(set(range(7)) - set(values))
+    if require_all and missing:
+        raise ValueError(f"context trace is missing {name} calls {missing}")
+    call_indices = sorted(values)
+    if not call_indices:
+        raise ValueError(f"context trace has no {name} calls")
+    calls = [values[index].detach().cpu().contiguous() for index in call_indices]
+    ranks = {value.ndim for value in calls}
+    if len(ranks) != 1:
+        raise ValueError(f"context trace changed {name} rank between calls")
+    flattened = torch.cat([value.reshape(-1) for value in calls], dim=0)
+    offsets = [0]
+    for value in calls:
+        offsets.append(offsets[-1] + value.numel())
+    encoded, encoding = _exact_array(torch, flattened)
+    return {
+        f"{name}_values": encoded,
+        f"{name}_offsets": offsets,
+        f"{name}_shapes": [list(value.shape) for value in calls],
+        f"{name}_call_indices": call_indices,
+    }, encoding
+
+
+def _context_state_arrays(
+    runtime: Any, decision: PolicyDecision
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if decision.trace is None:
+        raise ValueError("context archive requires a language trace")
+    trace = decision.trace
+    if trace.initial_pixel_values is None or trace.initial_language_input is None:
+        raise ValueError("context archive is missing processed model inputs")
+    if set(trace.prompt_cache) != set(range(32)):
+        raise ValueError("context archive is missing the full prompt cache")
+
+    arrays = {}
+    encodings = {}
+    for name, values in (
+        ("model_input_ids", trace.model_input_ids_by_call),
+        ("model_attention_mask", trace.model_attention_masks_by_call),
+        ("decoder_position_ids", trace.decoder_position_ids_by_call),
+        ("decoder_cache_position", trace.decoder_cache_positions_by_call),
+    ):
+        current, encoding = _ragged_calls(runtime.torch, values, name)
+        arrays.update(current)
+        encodings[name] = encoding
+
+    arrays["decoder_attention_mask_present"] = [
+        bool(trace.decoder_attention_mask_present_by_call.get(index, False))
+        for index in range(7)
+    ]
+    if trace.decoder_attention_masks_by_call:
+        current, encoding = _ragged_calls(
+            runtime.torch,
+            trace.decoder_attention_masks_by_call,
+            "decoder_attention_mask",
+            require_all=False,
+        )
+        arrays.update(current)
+        encodings["decoder_attention_mask"] = encoding
+
+    for name, value in (
+        ("processed_pixel_values", trace.initial_pixel_values),
+        ("initial_language_input", trace.initial_language_input),
+        (
+            "prompt_cache_keys",
+            runtime.torch.stack(
+                [trace.prompt_cache[layer]["key"] for layer in range(32)]
+            ),
+        ),
+        (
+            "prompt_cache_values",
+            runtime.torch.stack(
+                [trace.prompt_cache[layer]["value"] for layer in range(32)]
+            ),
+        ),
+    ):
+        arrays[name], encodings[name] = _exact_array(runtime.torch, value)
+    return arrays, encodings
 
 
 def _sparse_trace_values(
@@ -184,6 +272,30 @@ class InterfaceArchiveBuilder:
         ]
         readers = {
             "residuals": (trace_tensor, True, True, "boundary"),
+            "block_inputs": (
+                lambda module, decision: internal_tensor(
+                    module, decision, "block_inputs_by_call"
+                ),
+                False,
+                False,
+                "boundary",
+            ),
+            "post_attention_residuals": (
+                lambda module, decision: internal_tensor(
+                    module, decision, "post_attention_residuals_by_call"
+                ),
+                False,
+                False,
+                "boundary",
+            ),
+            "attention_queries": (
+                lambda module, decision: internal_tensor(
+                    module, decision, "attention_queries_by_call"
+                ),
+                False,
+                False,
+                "boundary",
+            ),
             "attention_cache_keys": (
                 lambda module, decision: cache_tensor(module, decision, "key"),
                 False,
@@ -197,6 +309,14 @@ class InterfaceArchiveBuilder:
                 "fault",
             ),
         }
+        detailed = bool(self.clean.trace and self.clean.trace.prompt_cache)
+        if not detailed:
+            for name in (
+                "block_inputs",
+                "post_attention_residuals",
+                "attention_queries",
+            ):
+                readers.pop(name)
         for name, (
             reader,
             fault_includes_boundary,
@@ -267,12 +387,24 @@ class InterfaceArchiveBuilder:
             for name, value in _generation_arrays(torch, decisions).items():
                 arrays[f"{prefix}_{name}"] = value
 
+        context_state_encodings = {}
+        if detailed:
+            for prefix, decision in (("source", self.source), ("clean", self.clean)):
+                current, current_encodings = _context_state_arrays(
+                    self.runtime, decision
+                )
+                arrays.update(
+                    {f"{prefix}_{name}": value for name, value in current.items()}
+                )
+                context_state_encodings[prefix] = current_encodings
+
         write_npz_atomic(path, np, arrays)
         return {
-            "schema_version": 2,
+            "schema_version": 3 if detailed else 2,
             "artifact": artifact_record(path),
             "residual_axes": ["language_block", "action_token_position", "hidden"],
             "trace_encodings": encodings,
+            "context_state_encodings": context_state_encodings,
             "fault_records": len(self.faults),
             "boundary_replay_records": len(self.replays),
             "trace_row_counts": row_counts,
@@ -281,12 +413,24 @@ class InterfaceArchiveBuilder:
                     "post-block output; the selected boundary row is the exact "
                     "intervention or replay value"
                 ),
+                "block_inputs": (
+                    "final sequence position entering each language block; the "
+                    "selected fault layer is excluded because replacement occurs "
+                    "at that block's output"
+                ),
+                "post_attention_residuals": (
+                    "final sequence position entering post_attention_layernorm, "
+                    "which is the exact residual after the attention sublayer"
+                ),
+                "attention_queries": (
+                    "exact final-position query after rotary position encoding, "
+                    "organized by language block, generation call, head, and head feature"
+                ),
                 "attention_cache_keys": (
-                    "exact post-rotary key entry appended for the current token; "
-                    "only the new differential entry is stored because the earlier "
-                    "cache prefix predates the intervention; replay rows begin just "
-                    "after the original fault so the complete repaired cache cut is "
-                    "auditable"
+                    "exact post-rotary cache entry appended on each generation call; "
+                    "call zero writes the final prompt position and calls one through "
+                    "six write the previously emitted action tokens. Only differential "
+                    "fault rows are stored after the clean full prompt cache"
                 ),
                 "attention_cache_values": (
                     "exact value entry appended for the current token, with the same "
@@ -307,4 +451,26 @@ class InterfaceArchiveBuilder:
                     "complete prompt and generated token IDs returned by generate"
                 ),
             },
+            "context_state": (
+                {
+                    "model_inputs": (
+                        "exact per-call input IDs and masks, initial processed pixels, "
+                        "and the complete fused sequence entering language block zero"
+                    ),
+                    "prompt_cache": (
+                        "all 32 key/value layers at the start of generation call one, "
+                        "after the prompt pass and before action token zero is consumed"
+                    ),
+                    "prompt_cache_formats": {
+                        "source": self.source.trace.prompt_cache_format,
+                        "clean": self.clean.trace.prompt_cache_format,
+                    },
+                    "attention_conditioning": (
+                        "post-rotary current queries plus the prompt cache and every "
+                        "subsequent key/value write"
+                    ),
+                }
+                if detailed
+                else None
+            ),
         }

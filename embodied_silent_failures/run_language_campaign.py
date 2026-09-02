@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import shutil
+import subprocess
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -18,6 +22,7 @@ from embodied_silent_failures.language_campaign import (
 from embodied_silent_failures.language_fault import LanguageBlockInjector
 from embodied_silent_failures.language_worker import error_record, run_context
 from embodied_silent_failures.openvla_runtime import (
+    CHECKPOINT_REVISION,
     array_sha256,
     load_runtime,
     model_config,
@@ -101,8 +106,58 @@ def _immutable_run_identity(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _package_versions(names: tuple[str, ...]) -> dict[str, str | None]:
+    versions = {}
+    for name in names:
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = None
+    return versions
+
+
+def _checkpoint_manifest(checkpoint: Path) -> dict[str, Any]:
+    entries = []
+    for path in sorted(item for item in checkpoint.rglob("*") if item.is_file()):
+        entries.append(
+            {
+                "path": str(path.relative_to(checkpoint)),
+                "size": path.stat().st_size,
+                "resolved_name": path.resolve().name,
+            }
+        )
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return {
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "file_count": len(entries),
+        "basis": "relative path, byte size, and resolved Hugging Face blob name",
+    }
+
+
+def _gpu_record() -> list[str]:
+    result = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,driver_version",
+            "--format=csv,noheader",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def _execution(args: argparse.Namespace, manifest: dict[str, Any]) -> dict[str, Any]:
     root = Path(__file__).resolve().parents[1]
+    import torch
+
+    checkpoint_files = {}
+    for name in ("config.json", "dataset_statistics.json"):
+        path = args.checkpoint / name
+        checkpoint_files[name] = file_sha256(path) if path.is_file() else None
     return {
         "started_at": _now(),
         "experiment_code": git_state(root),
@@ -111,6 +166,43 @@ def _execution(args: argparse.Namespace, manifest: dict[str, Any]) -> dict[str, 
         "libero_config": {
             "path": str(args.libero_config.resolve()),
             "sha256": file_sha256(args.libero_config / "config.yaml"),
+        },
+        "checkpoint": {
+            "path": str(args.checkpoint.resolve()),
+            "revision": CHECKPOINT_REVISION,
+            "manifest": _checkpoint_manifest(args.checkpoint),
+            "files": checkpoint_files,
+        },
+        "runtime": {
+            "python": platform.python_version(),
+            "cuda": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version(),
+            "gpus": _gpu_record(),
+            "packages": _package_versions(
+                (
+                    "accelerate",
+                    "bddl",
+                    "flash-attn",
+                    "gym",
+                    "huggingface-hub",
+                    "imageio",
+                    "libero",
+                    "mujoco",
+                    "numpy",
+                    "opencv-python",
+                    "protobuf",
+                    "robosuite",
+                    "safetensors",
+                    "tensorflow",
+                    "tensorflow-datasets",
+                    "tensorflow-metadata",
+                    "timm",
+                    "tokenizers",
+                    "torch",
+                    "torchvision",
+                    "transformers",
+                )
+            ),
         },
         "manifest_file_sha256": file_sha256(args.manifest),
         "manifest_content_sha256": manifest_sha256(manifest),

@@ -108,7 +108,9 @@ def sample_sites(
     return sorted(selected, key=lambda value: value["site"]["site_id"]), stratum_sizes
 
 
-def clean_success_frame(clean_root: Path) -> list[dict[str, Any]]:
+def clean_rollout_frame(
+    clean_root: Path, *, successful_only: bool
+) -> list[dict[str, Any]]:
     indexed: dict[tuple[int, int], dict[str, Any]] = {}
     for path in sorted(clean_root.rglob("*.complete.json")):
         result = load_json(path)
@@ -117,7 +119,7 @@ def clean_success_frame(clean_root: Path) -> list[dict[str, Any]]:
         key = (int(result["task_id"]), int(result["episode_index"]))
         if key in indexed:
             raise ValueError(f"duplicate clean baseline result for {key}")
-        if result.get("success") is not True:
+        if successful_only and result.get("success") is not True:
             continue
         files = result.get("files", {})
         csv_path = path.parent / str(files.get("csv"))
@@ -130,6 +132,7 @@ def clean_success_frame(clean_root: Path) -> list[dict[str, Any]]:
             "policy_steps": int(result["policy_steps"]),
             "trial_seed": int(result["trial_seed"]),
             "initial_state_sha256": str(result["initial_state_sha256"]),
+            "clean_success": bool(result.get("success")),
             "source": {
                 "completion": path,
                 "csv": csv_path,
@@ -137,8 +140,13 @@ def clean_success_frame(clean_root: Path) -> list[dict[str, Any]]:
             },
         }
     if not indexed:
-        raise ValueError("clean baseline contains no successful trajectories")
+        population = "successful trajectories" if successful_only else "rollouts"
+        raise ValueError(f"clean baseline contains no completed {population}")
     return [indexed[key] for key in sorted(indexed)]
+
+
+def clean_success_frame(clean_root: Path) -> list[dict[str, Any]]:
+    return clean_rollout_frame(clean_root, successful_only=True)
 
 
 def _artifact_record(path: Path) -> dict[str, Any]:

@@ -121,6 +121,8 @@ def capture_context(
     *,
     wait_steps: int,
     executed_prefix: tuple[Any, ...] | None = None,
+    capture_internal_state: bool = False,
+    capture_context_state: bool = False,
 ) -> CapturedContext:
     observation = _start_episode(runtime, env, initial_state, wait_steps)
     prefix_commands = []
@@ -144,6 +146,8 @@ def capture_context(
             task_description,
             injector=injector if trace_source else None,
             action_token_position=token_position if trace_source else None,
+            capture_internal_state=capture_internal_state if trace_source else False,
+            capture_context_state=capture_context_state if trace_source else False,
         )
         if trace_source:
             source_trace = decision.trace

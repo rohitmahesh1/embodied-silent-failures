@@ -1,6 +1,9 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from embodied_silent_failures.run_language_campaign import (
+    _checkpoint_manifest,
     _immutable_run_identity,
     _select_contexts,
 )
@@ -72,6 +75,29 @@ class RunLanguageCampaignTests(unittest.TestCase):
         changed_restoration = {**run, "branch_state_restoration": "prefix-replay"}
         self.assertNotEqual(
             _immutable_run_identity(run), _immutable_run_identity(changed_restoration)
+        )
+
+    def test_checkpoint_manifest_tracks_blob_identity_without_reading_weights(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            blobs = root / "blobs"
+            snapshot = root / "snapshot"
+            blobs.mkdir()
+            snapshot.mkdir()
+            blob = blobs / "abc123"
+            blob.write_bytes(b"weights")
+            (snapshot / "model.safetensors").symlink_to(blob)
+
+            record = _checkpoint_manifest(snapshot)
+
+        self.assertEqual(record["file_count"], 1)
+        self.assertEqual(
+            record["basis"],
+            "relative path, byte size, and resolved Hugging Face blob name",
+        )
+        self.assertEqual(
+            record["sha256"],
+            "1ba57c8d58bdc48b3c99631e3c3cc5d1030f9995ea2982b524e8626d410472f3",
         )
 
 

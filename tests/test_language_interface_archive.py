@@ -15,7 +15,9 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
         cls.np = np
         cls.torch = torch
 
-    def _decision(self, offset: float, token_position: int = 2):
+    def _decision(
+        self, offset: float, token_position: int = 2, detailed: bool = False
+    ):
         from embodied_silent_failures.language_fault import LanguageInferenceTrace
         from embodied_silent_failures.language_policy import (
             GenerationLogitTrace,
@@ -30,6 +32,17 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
             }
             for layer in range(32)
         }
+        detailed_rows = (
+            {
+                layer: {
+                    token: torch.full((1, 1, 4), offset + layer + token)
+                    for token in range(7)
+                }
+                for layer in range(32)
+            }
+            if detailed
+            else {}
+        )
         trace = LanguageInferenceTrace(
             action_token_position=token_position,
             block_values={layer: by_call[layer][token_position] for layer in range(32)},
@@ -53,6 +66,82 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
             },
             call_counts={layer: 7 for layer in range(32)},
             anomalies=(),
+            block_inputs_by_call=detailed_rows,
+            post_attention_residuals_by_call=detailed_rows,
+            attention_queries_by_call=(
+                {
+                    layer: {
+                        token: torch.full(
+                            (1, 2, 1, 2), offset + layer + token
+                        )
+                        for token in range(7)
+                    }
+                    for layer in range(32)
+                }
+                if detailed
+                else {}
+            ),
+            model_input_ids_by_call=(
+                {
+                    token: torch.arange(3 if token == 0 else 1).reshape(1, -1)
+                    for token in range(7)
+                }
+                if detailed
+                else {}
+            ),
+            model_attention_masks_by_call=(
+                {
+                    token: torch.ones((1, 3 + token), dtype=torch.int64)
+                    for token in range(7)
+                }
+                if detailed
+                else {}
+            ),
+            decoder_position_ids_by_call=(
+                {
+                    token: torch.arange(3 if token == 0 else 1).reshape(1, -1)
+                    for token in range(7)
+                }
+                if detailed
+                else {}
+            ),
+            decoder_cache_positions_by_call=(
+                {
+                    token: torch.arange(3 if token == 0 else 1)
+                    for token in range(7)
+                }
+                if detailed
+                else {}
+            ),
+            decoder_attention_mask_present_by_call=(
+                {token: False for token in range(7)} if detailed else {}
+            ),
+            prompt_cache=(
+                {
+                    layer: {
+                        kind: torch.full(
+                            (1, 2, 3, 2), offset + layer, dtype=torch.bfloat16
+                        )
+                        for kind in ("key", "value")
+                    }
+                    for layer in range(32)
+                }
+                if detailed
+                else {}
+            ),
+            prompt_cache_format=(
+                "transformers_legacy_tuple" if detailed else None
+            ),
+            initial_pixel_values=(
+                torch.full((1, 3, 2, 2), offset, dtype=torch.bfloat16)
+                if detailed
+                else None
+            ),
+            initial_language_input=(
+                torch.full((1, 3, 4), offset, dtype=torch.bfloat16)
+                if detailed
+                else None
+            ),
         )
         logits = GenerationLogitTrace(
             sequence_token_ids=torch.arange(307, dtype=torch.int64),
@@ -148,6 +237,53 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
             self.assertEqual(record["trace_row_counts"]["replay_residuals"], 0)
             self.assertEqual(
                 record["trace_row_counts"]["replay_attention_cache_keys"], 0
+            )
+
+    def test_context_archive_retains_prompt_state_and_internal_cuts(self) -> None:
+        from embodied_silent_failures.language_interface_archive import (
+            InterfaceArchiveBuilder,
+        )
+
+        runtime = SimpleNamespace(torch=self.torch, np=self.np)
+        builder = InterfaceArchiveBuilder(
+            runtime,
+            self._decision(1.0, detailed=True),
+            self._decision(2.0, detailed=True),
+        )
+        builder.add_fault(30, self._decision(3.0, detailed=True))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "interfaces.npz"
+            record = builder.write(path)
+            with self.np.load(path, allow_pickle=False) as archive:
+                self.assertEqual(
+                    archive["clean_prompt_cache_keys"].shape,
+                    (32, 1, 2, 3, 2),
+                )
+                self.assertEqual(
+                    archive["clean_processed_pixel_values"].shape, (1, 3, 2, 2)
+                )
+                self.assertEqual(
+                    archive["clean_initial_language_input"].shape, (1, 3, 4)
+                )
+                self.assertEqual(
+                    archive["clean_model_input_ids_offsets"].tolist(),
+                    [0, 3, 4, 5, 6, 7, 8, 9],
+                )
+                self.assertEqual(
+                    archive["fault_block_inputs_row_layer"][0], 31
+                )
+                self.assertEqual(
+                    archive["fault_attention_queries"].shape[1:], (2, 2)
+                )
+            self.assertEqual(record["schema_version"], 3)
+            self.assertIn("prompt_cache", record["context_state"])
+            self.assertEqual(
+                record["context_state"]["prompt_cache_formats"],
+                {
+                    "source": "transformers_legacy_tuple",
+                    "clean": "transformers_legacy_tuple",
+                },
             )
 
     def test_boundary_target_selection_does_not_duplicate_final_layer(self) -> None:
