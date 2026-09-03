@@ -236,7 +236,7 @@ class TemporalSiteTests(unittest.TestCase):
         ]
         self.assertEqual(site["status"], "structurally_ineligible")
         self.assertIn(
-            "output_port_does_not_reach_the_executed_command",
+            "output_port_reaches_neither_declared_sink",
             site["eligibility_reasons"],
         )
 
@@ -271,6 +271,16 @@ class TemporalSiteTests(unittest.TestCase):
         )
         self.assertEqual(site["value_families"], ["image_array"])
         self.assertEqual(site["fault_interfaces"], ["policy_image_buffer"])
+        self.assertEqual(site["eligible_opportunity_count"], 1)
+
+    def test_monitor_input_is_an_eligible_monitor_only_site(self) -> None:
+        site = next(
+            site
+            for site in self.table["sites"]
+            if site["identity"].get("event_name") == "safe.monitor_input"
+        )
+        self.assertEqual(site["topologies"], ["monitor_evidence_only"])
+        self.assertEqual(site["status"], "structurally_eligible_pending_canary")
         self.assertEqual(site["eligible_opportunity_count"], 1)
 
     def test_action_anchor_outputs_are_not_action_sites(self) -> None:

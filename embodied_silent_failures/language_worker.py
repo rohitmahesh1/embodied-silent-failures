@@ -95,7 +95,7 @@ def _group_record(group: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _run_branch(
+def run_resilient_terminal_branch(
     *,
     output_dir: Path,
     runtime: Any,
@@ -434,7 +434,7 @@ def run_context(
     }
     command_groups = _command_groups(runtime, candidates)
     if terminal_branches:
-        control_result = _run_branch(
+        control_result = run_resilient_terminal_branch(
             output_dir=output_dir / "attempts" / f"{context['context_id']}-control",
             runtime=runtime,
             policy_config=policy_config,
@@ -476,7 +476,7 @@ def run_context(
             "local_measurements": local_record,
             "branch_state_restoration": branch_state_restoration,
         }
-        result = _run_branch(
+        result = run_resilient_terminal_branch(
             output_dir=output_dir
             / "attempts"
             / f"{context['context_id']}-command-{group['command_id'][:12]}",

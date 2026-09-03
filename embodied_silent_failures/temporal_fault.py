@@ -27,6 +27,7 @@ class TemporalReplacementSpec:
     policy_step: int
     source_policy_step: int
     mode: str = "prior_value"
+    value_slice: str = "full"
 
     def __post_init__(self) -> None:
         if not self.site_id:
@@ -46,6 +47,8 @@ class TemporalReplacementSpec:
                 raise ValueError("current-value canary must source its target step")
         else:
             raise ValueError(f"unsupported temporal replacement mode: {self.mode}")
+        if self.value_slice not in {"full", "final_sequence_position"}:
+            raise ValueError(f"unsupported temporal value slice: {self.value_slice}")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -101,6 +104,26 @@ def replace_at_port(value: Any, port: str, replacement: Any) -> Any:
         )
 
     return replace(value, _port_tokens(port))
+
+
+def value_slice(value: Any, selector: str) -> Any:
+    if selector == "full":
+        return value
+    if selector == "final_sequence_position":
+        if getattr(value, "ndim", None) != 3:
+            raise ValueError("final-sequence selection requires a rank-three value")
+        return value[:, -1:, :]
+    raise ValueError(f"unsupported temporal value slice: {selector}")
+
+
+def replace_value_slice(value: Any, selector: str, replacement: Any) -> Any:
+    if selector == "full":
+        return replacement
+    if selector == "final_sequence_position":
+        changed = value.clone() if hasattr(value, "clone") else value.copy()
+        changed[:, -1:, :] = replacement
+        return changed
+    raise ValueError(f"unsupported temporal value slice: {selector}")
 
 
 def _plain_schema(value: Any) -> dict[str, Any]:
@@ -279,14 +302,18 @@ class TemporalReplacementInjector:
             self._handle = None
         self._source = None
 
-    def begin_trial(self, trial_seed: int) -> None:
+    def begin_trial(self, trial_seed: int, *, source_value: Any = None) -> None:
         if trial_seed < 0:
             raise ValueError("trial seed must be non-negative")
         self._trial_seed = trial_seed
         self._policy_step = None
         self._module_call_index = 0
         self._boundary_calls = {}
-        self._source = None
+        self._source = (
+            None
+            if source_value is None
+            else _clone(self._torch, self._np, source_value)
+        )
         self._record = None
 
     @contextmanager
@@ -367,7 +394,8 @@ class TemporalReplacementInjector:
         }:
             return output
         port = str(self.spec.identity["output_port"])
-        current = value_at_port(output, port)
+        port_value = value_at_port(output, port)
+        current = value_slice(port_value, self.spec.value_slice)
         if active_step == self.spec.source_policy_step:
             self._source = _clone(self._torch, self._np, current)
             if self.spec.mode == "prior_value":
@@ -381,6 +409,12 @@ class TemporalReplacementInjector:
         )
         if source is None:
             raise RuntimeError("temporal replacement has no captured source value")
+        if isinstance(current, self._torch.Tensor):
+            if not isinstance(source, self._torch.Tensor):
+                raise TypeError("a tensor site requires a tensor source value")
+            if tuple(source.shape) != tuple(current.shape) or source.dtype != current.dtype:
+                raise ValueError("prior and current temporal values have different schemas")
+            source = source.to(device=current.device, dtype=current.dtype)
         comparison = (
             _comparison(self._torch, source, current)
             if isinstance(current, self._torch.Tensor)
@@ -396,7 +430,10 @@ class TemporalReplacementInjector:
         }
         if self._observer is not None:
             self._observer(current, replacement, self._record)
-        return replace_at_port(output, port, replacement)
+        changed_port = replace_value_slice(
+            port_value, self.spec.value_slice, replacement
+        )
+        return replace_at_port(output, port, changed_port)
 
 
 class TemporalProcessor:

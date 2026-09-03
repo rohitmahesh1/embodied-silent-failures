@@ -5,6 +5,7 @@ from embodied_silent_failures.temporal_fault import (
     TemporalReplacementSpec,
     replace_at_port,
     value_at_port,
+    value_slice,
 )
 
 
@@ -37,6 +38,18 @@ class TemporalPortTests(unittest.TestCase):
             TemporalReplacementSpec(
                 "site", identity, 4, 3, mode="current_value_canary"
             )
+
+    def test_final_sequence_slice_preserves_prompt_positions(self) -> None:
+        try:
+            import numpy as np
+        except ImportError as error:
+            raise unittest.SkipTest("NumPy is required") from error
+        value = np.arange(24).reshape(1, 3, 8)
+        self.assertTrue(
+            np.array_equal(
+                value_slice(value, "final_sequence_position"), value[:, -1:, :]
+            )
+        )
 
 
 class TemporalInjectorTests(unittest.TestCase):
@@ -113,6 +126,48 @@ class TemporalInjectorTests(unittest.TestCase):
         self.assertTrue(self.torch.equal(value, observed))
         self.assertIsNot(value, observed)
         self.assertTrue(record["comparison"]["exact_equal"])
+
+    def test_preloaded_source_supports_direct_state_branching(self) -> None:
+        model = self._model()
+        injector = TemporalReplacementInjector(
+            self.torch,
+            self.np,
+            TemporalReplacementSpec("site", self._identity(), 4, 3),
+        )
+        injector.install(model)
+        source = self.torch.tensor([1.0, 2.0])
+        injector.begin_trial(9, source_value=source)
+        with injector.inference(4):
+            replaced = model(self.torch.tensor([4.0, 8.0]))
+        record = injector.require_injected()
+        injector.close()
+
+        self.assertTrue(self.torch.equal(source, replaced))
+        self.assertEqual(record["source_policy_step"], 3)
+
+    def test_final_sequence_replacement_keeps_current_prompt_positions(self) -> None:
+        model = self._model()
+        injector = TemporalReplacementInjector(
+            self.torch,
+            self.np,
+            TemporalReplacementSpec(
+                "site",
+                self._identity(),
+                4,
+                3,
+                value_slice="final_sequence_position",
+            ),
+        )
+        injector.install(model)
+        source = self.torch.tensor([[[1.0, 2.0]]])
+        current = self.torch.tensor([[[3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]])
+        injector.begin_trial(9, source_value=source)
+        with injector.inference(4):
+            replaced = model(current)
+        injector.close()
+
+        self.assertTrue(self.torch.equal(replaced[:, :-1, :], current[:, :-1, :]))
+        self.assertTrue(self.torch.equal(replaced[:, -1:, :], source))
 
     def test_declared_boundary_uses_the_same_port_mechanics(self) -> None:
         identity = {

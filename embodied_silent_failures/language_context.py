@@ -108,6 +108,16 @@ def _start_episode(runtime: Runtime, env: Any, initial_state: Any, wait_steps: i
     return observation
 
 
+def action_row(
+    policy_step: int, command: Any, decision: PolicyDecision
+) -> dict[str, Any]:
+    return _action_row(policy_step, command, decision)
+
+
+def start_episode(runtime: Runtime, env: Any, initial_state: Any, wait_steps: int) -> Any:
+    return _start_episode(runtime, env, initial_state, wait_steps)
+
+
 def capture_context(
     runtime: Runtime,
     policy_config: Any,

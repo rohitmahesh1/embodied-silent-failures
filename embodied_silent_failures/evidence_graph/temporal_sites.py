@@ -53,7 +53,9 @@ def _site_row(site_id: str, observations: list[dict[str, Any]]) -> dict[str, Any
                 continue
             if current["disposition"]:
                 continue
-            if not current["action_reachable"]:
+            if not (
+                current["action_reachable"] or current["monitor_reachable"]
+            ):
                 continue
             opportunities.append(
                 {
@@ -67,8 +69,11 @@ def _site_row(site_id: str, observations: list[dict[str, Any]]) -> dict[str, Any
     reasons = []
     if all(observation["disposition"] for observation in observations):
         reasons.append("all_observations_have_a_declared_disposition")
-    if not any(observation["action_reachable"] for observation in observations):
-        reasons.append("output_port_does_not_reach_the_executed_command")
+    if not any(
+        observation["action_reachable"] or observation["monitor_reachable"]
+        for observation in observations
+    ):
+        reasons.append("output_port_reaches_neither_declared_sink")
     if not opportunities:
         if consecutive_pairs == 0:
             reasons.append("no_consecutive_policy_steps_were_traced_for_this_site")
@@ -80,7 +85,11 @@ def _site_row(site_id: str, observations: list[dict[str, Any]]) -> dict[str, Any
     if opportunities:
         status = "structurally_eligible_pending_canary"
     elif consecutive_pairs == 0 and any(
-        observation["action_reachable"] and not observation["disposition"]
+        (
+            observation["action_reachable"]
+            or observation["monitor_reachable"]
+        )
+        and not observation["disposition"]
         for observation in observations
     ):
         status = "unresolved_without_consecutive_trace"
@@ -204,7 +213,7 @@ def build_temporal_site_table(
         topology for site in sites for topology in site["topologies"]
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "sampling_frame": (
             "one row per observed numeric module-output port or declared runtime-"
             "boundary port; one opportunity is the same site observed at consecutive "
@@ -228,7 +237,7 @@ def build_temporal_site_table(
             "derived": (
                 "A temporal opportunity requires observations at t-1 and t with an "
                 "identical schema and a non-temporal path from the current output port "
-                "to the executed simulator command."
+                "to either the executed simulator command or the monitor-evidence sink."
             ),
             "not_established": (
                 "Structural eligibility does not establish hook equivalence, numerical "

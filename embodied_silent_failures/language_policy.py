@@ -36,7 +36,7 @@ class PolicyDecision:
     inference_seconds: float
 
 
-def _hidden_states(runtime: Runtime, generated: Any) -> Any:
+def extract_hidden_states(runtime: Runtime, generated: Any) -> Any:
     # SAFE OpenVLA 300dce26 returns one hidden-state tuple per generated action
     # token. SAFE's public loader consumes the final layer at the final sequence
     # position, matching openvla_rollout.py::_extract_hidden_states.
@@ -47,7 +47,7 @@ def _hidden_states(runtime: Runtime, generated: Any) -> Any:
     return result
 
 
-def _generation_logits(runtime: Runtime, generated: Any) -> GenerationLogitTrace:
+def generation_logit_trace(runtime: Runtime, generated: Any) -> GenerationLogitTrace:
     # SAFE OpenVLA 300dce26, modeling_prismatic.py::predict_action, decodes
     # actions from the final 256 vocabulary entries. Keep that complete action
     # vocabulary plus the global top tokens and exact normalization summaries;
@@ -142,8 +142,8 @@ def policy_decision(
         raw_action=raw_action,
         command=runtime.np.asarray(command).copy(),
         action_tokens=tuple(int(value) for value in action_tokens.tolist()),
-        hidden_states=_hidden_states(runtime, generated),
-        generation_logits=_generation_logits(runtime, generated),
+        hidden_states=extract_hidden_states(runtime, generated),
+        generation_logits=generation_logit_trace(runtime, generated),
         trace=injector.last_trace if injector is not None else None,
         inference_seconds=inference_seconds,
     )
