@@ -7,6 +7,7 @@ import numpy as np
 
 from embodied_silent_failures.language_context import (
     CapturedContext,
+    replay_context,
     write_captured_context_archive,
 )
 from embodied_silent_failures.openvla_runtime import array_sha256
@@ -46,6 +47,63 @@ class CapturedContextArchiveTests(unittest.TestCase):
                 array_sha256(runtime, state),
             )
             self.assertEqual(manifest["artifact"]["name"], path.name)
+
+    def test_prefix_replay_reapplies_the_original_trial_seed(self) -> None:
+        class Runtime:
+            np = np
+
+            def __init__(self) -> None:
+                self.seeds = []
+
+            def set_seed_everywhere(self, seed: int) -> None:
+                self.seeds.append(seed)
+
+            @staticmethod
+            def get_libero_dummy_action(_model_family):
+                return np.asarray([0.0])
+
+        class Environment:
+            def __init__(self) -> None:
+                self.state = np.asarray([0.0])
+
+            def reset(self) -> None:
+                self.state = np.asarray([-1.0])
+
+            def set_init_state(self, state):
+                self.state = np.asarray(state).copy()
+                return {"state": self.state.copy()}
+
+            def step(self, command):
+                self.state = self.state + np.asarray(command)
+                return {"state": self.state.copy()}, 0.0, False, {}
+
+            def get_sim_state(self):
+                return self.state.copy()
+
+        runtime = Runtime()
+        environment = Environment()
+        captured = CapturedContext(
+            observation={"state": np.asarray([3.0])},
+            simulator_state=np.asarray([3.0]),
+            simulator_state_sha256="unused",
+            prefix_commands=(np.asarray([1.0]), np.asarray([2.0])),
+            prefix_hidden_states=(),
+            prefix_rows=(),
+            source_trace=None,
+        )
+
+        _observation, record = replay_context(
+            runtime,
+            environment,
+            np.asarray([0.0]),
+            captured,
+            wait_steps=2,
+            trial_seed=1234,
+        )
+
+        self.assertEqual(runtime.seeds, [1234])
+        self.assertTrue(record["simulator_state_exact_equal"])
+        self.assertEqual(record["trial_seed_reapplied"], 1234)
 
 
 if __name__ == "__main__":

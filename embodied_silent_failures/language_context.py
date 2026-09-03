@@ -231,11 +231,15 @@ def replay_context(
     captured: CapturedContext,
     *,
     wait_steps: int,
+    trial_seed: int,
 ) -> tuple[Any, dict[str, Any]]:
     # LIBERO@8f1084e, libero/envs/env_wrapper.py::get_sim_state, preserves only
     # MuJoCo's flattened state. Replaying through robosuite@1.4.1
     # environments/base.py::step also reconstructs the OSC controller cache and
     # GripperModel.current_action that a reset clears but the flattened state omits.
+    # Reapply the seed used before the original reset so LIBERO's reset-time
+    # randomization cannot change that hidden initial controller state.
+    runtime.set_seed_everywhere(trial_seed)
     observation = _start_episode(runtime, env, initial_state, wait_steps)
     for replay_step, command in enumerate(captured.prefix_commands):
         observation, _, done, _ = env.step(command.tolist())
@@ -248,6 +252,7 @@ def replay_context(
     state_difference = replay_state.astype(float) - captured.simulator_state.astype(float)
     return observation, {
         "method": "reset initial state and replay the captured executed-command prefix",
+        "trial_seed_reapplied": trial_seed,
         "simulator_state_sha256": array_sha256(runtime, replay_state),
         "simulator_state_exact_equal": bool(
             runtime.np.array_equal(replay_state, captured.simulator_state)
@@ -304,7 +309,12 @@ def run_terminal_branch(
         observation, replay = restore_context(runtime, env, captured)
     else:
         observation, replay = replay_context(
-            runtime, env, initial_state, captured, wait_steps=wait_steps
+            runtime,
+            env,
+            initial_state,
+            captured,
+            wait_steps=wait_steps,
+            trial_seed=int(context["trial_seed"]),
         )
     rows = [dict(row) for row in captured.prefix_rows]
     hidden_states = list(captured.prefix_hidden_states)
