@@ -232,6 +232,10 @@ def replay_context(
     *,
     wait_steps: int,
 ) -> tuple[Any, dict[str, Any]]:
+    # LIBERO@8f1084e, libero/envs/env_wrapper.py::get_sim_state, preserves only
+    # MuJoCo's flattened state. Replaying through robosuite@1.4.1
+    # environments/base.py::step also reconstructs the OSC controller cache and
+    # GripperModel.current_action that a reset clears but the flattened state omits.
     observation = _start_episode(runtime, env, initial_state, wait_steps)
     for replay_step, command in enumerate(captured.prefix_commands):
         observation, _, done, _ = env.step(command.tolist())

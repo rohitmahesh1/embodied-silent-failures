@@ -32,6 +32,11 @@ from embodied_silent_failures.temporal_values import (
 )
 
 
+ATLAS_STATE_RECONSTRUCTION = (
+    "reset to the episode initial state and replay the captured executed-command prefix"
+)
+
+
 def _token_change(clean: tuple[int, ...], faulted: tuple[int, ...]) -> dict[str, Any]:
     if len(clean) != len(faulted):
         raise ValueError("cannot compare action-token sequences with different lengths")
@@ -303,7 +308,7 @@ def run_atlas_context(
         "kind": "graph_atlas_current_control",
         "policy_step": int(context["policy_step"]),
         "source_policy_step": int(context["source_policy_step"]),
-        "state_restoration": "direct captured MuJoCo state",
+        "state_reconstruction": ATLAS_STATE_RECONSTRUCTION,
     }
     control = run_resilient_terminal_branch(
         output_dir=output_dir / "attempts" / f"{context['context_id']}-control",
@@ -321,7 +326,7 @@ def run_atlas_context(
         execution=execution,
         condition="atlas_control",
         wait_steps=wait_steps,
-        restore_directly=True,
+        restore_directly=False,
     )
     branches.append({"branch": "control", "result": control})
     command_groups = _command_groups(runtime, candidates)
@@ -348,7 +353,7 @@ def run_atlas_context(
             "site_id": site_id,
             "command_group": group_record,
             "representative_local_measurements": local_record,
-            "state_restoration": "direct captured MuJoCo state",
+            "state_reconstruction": ATLAS_STATE_RECONSTRUCTION,
         }
         result = run_resilient_terminal_branch(
             output_dir=(
@@ -370,7 +375,7 @@ def run_atlas_context(
             execution=execution,
             condition="atlas_temporal_fault",
             wait_steps=wait_steps,
-            restore_directly=True,
+            restore_directly=False,
         )
         branches.append(
             {
