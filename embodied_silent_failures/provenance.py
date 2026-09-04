@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import inspect
 import json
@@ -24,7 +25,8 @@ def json_sha256(value: Any) -> str:
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as file:
+    opener = gzip.open if path.suffix == ".gz" else Path.open
+    with opener(path, "rt", encoding="utf-8") as file:
         value = json.load(file)
     if not isinstance(value, dict):
         raise ValueError(f"expected a JSON object in {path}")

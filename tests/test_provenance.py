@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import json
 import tempfile
@@ -34,6 +35,14 @@ class ProvenanceTests(unittest.TestCase):
             self.assertEqual(load_json(object_path), {"value": 1})
             with self.assertRaises(ValueError):
                 load_json(list_path)
+
+    def test_json_loader_reads_gzip_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.json.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as file:
+                json.dump({"value": 1}, file)
+
+            self.assertEqual(load_json(path), {"value": 1})
 
     def test_source_record_names_and_hashes_the_implementation_file(self) -> None:
         record = source_file_record(self)
