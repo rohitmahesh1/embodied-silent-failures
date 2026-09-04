@@ -13,6 +13,8 @@ TREATMENT_CONDITIONS = frozenset(
     {
         "activation_control",
         "activation_fault",
+        "atlas_control",
+        "atlas_temporal_fault",
         "current_image_control",
         "stale_image",
     }

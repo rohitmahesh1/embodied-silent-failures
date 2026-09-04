@@ -172,6 +172,10 @@ class AnalysisTests(unittest.TestCase):
 
         self.assertEqual(outcome.category, PRESERVED_SUCCESS)
 
+    def test_safe_scorer_accepts_atlas_physical_branches(self) -> None:
+        self.assertIn("atlas_control", TREATMENT_CONDITIONS)
+        self.assertIn("atlas_temporal_fault", TREATMENT_CONDITIONS)
+
 
 if __name__ == "__main__":
     unittest.main()
