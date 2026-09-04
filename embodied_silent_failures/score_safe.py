@@ -2,10 +2,11 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from embodied_silent_failures.analysis import Alarm, TREATMENT_CONDITIONS
+from embodied_silent_failures.analysis import TREATMENT_CONDITIONS, Alarm
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.evidence_graph.rollout import attach_monitor_timeline
 from embodied_silent_failures.provenance import (
@@ -14,7 +15,6 @@ from embodied_silent_failures.provenance import (
     git_revision,
     load_json,
 )
-
 
 SAFE_REVISION = "b6036abe07b2b2bb9996afb2c07f13d6a9f507c0"
 ALARM_WINDOWS = {
@@ -190,10 +190,9 @@ def main() -> None:
     sys.path.insert(0, str(args.safe_root.resolve()))
     import numpy as np
     import torch
-    from omegaconf import OmegaConf
-
     from failure_prob.data import openvla
     from failure_prob.model import get_model
+    from omegaconf import OmegaConf
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required to score SAFE fault traces")
@@ -209,7 +208,49 @@ def main() -> None:
     cfg = OmegaConf.load(monitor_paths["configuration"])
     safe_model_name = str(cfg.model.name)
     monitor_kind = _monitor_kind(safe_model_name)
-    indexed_rollouts = []
+    pending_rollouts = []
+    scored_rollouts = []
+    model = None
+    input_dim = None
+
+    def score_pending(count: int) -> None:
+        nonlocal model, input_dim
+        chunk = pending_rollouts[:count]
+        del pending_rollouts[:count]
+        dimension = int(chunk[0][1].hidden_states.shape[-1])
+        if input_dim is None:
+            input_dim = dimension
+            model = get_model(cfg, input_dim)
+            state_dict = torch.load(monitor_paths["checkpoint"], map_location="cpu")
+            model.load_state_dict(state_dict)
+            model.to("cuda")
+            model.eval()
+        if any(
+            int(item[1].hidden_states.shape[-1]) != input_dim for item in chunk
+        ):
+            raise ValueError("fault traces do not share one SAFE feature dimension")
+        maximum_length = max(len(item[1].hidden_states) for item in chunk)
+        features = torch.zeros(
+            (len(chunk), maximum_length, input_dim), dtype=torch.float32
+        )
+        for index, (_, rollout, _) in enumerate(chunk):
+            length = len(rollout.hidden_states)
+            features[index, :length] = rollout.hidden_states
+        with torch.no_grad():
+            padded = model({"features": features.to("cuda")}).squeeze(-1)
+        for index, (label, rollout, completion) in enumerate(chunk):
+            length = len(rollout.hidden_states)
+            values = padded[index, :length].detach().cpu().numpy().astype(np.float32)
+            scored_rollouts.append(
+                (
+                    label,
+                    int(rollout.task_id),
+                    int(rollout.episode_idx),
+                    completion,
+                    values,
+                )
+            )
+
     for label, run_dir in zip(labels, args.run_dirs):
         if not run_dir.is_dir():
             raise FileNotFoundError(f"fault run directory does not exist: {run_dir}")
@@ -236,41 +277,20 @@ def main() -> None:
                 raise ValueError(f"SAFE trace label disagrees with result for {label}/{key}")
             if len(rollout.hidden_states) != int(completion["policy_steps"]):
                 raise ValueError(f"SAFE trace length disagrees with result for {label}/{key}")
-            indexed_rollouts.append((label, rollout, completion))
-
-    indexed_rollouts.sort(key=lambda item: (item[0], item[1].task_id, item[1].episode_idx))
-    input_dim = int(indexed_rollouts[0][1].hidden_states.shape[-1])
-    if any(int(item[1].hidden_states.shape[-1]) != input_dim for item in indexed_rollouts):
-        raise ValueError("fault traces do not share one SAFE feature dimension")
-
-    model = get_model(cfg, input_dim)
-    state_dict = torch.load(monitor_paths["checkpoint"], map_location="cpu")
-    model.load_state_dict(state_dict)
-    model.to("cuda")
-    model.eval()
-
-    scores = []
-    for start in range(0, len(indexed_rollouts), args.batch_size):
-        chunk = indexed_rollouts[start : start + args.batch_size]
-        max_length = max(len(item[1].hidden_states) for item in chunk)
-        features = torch.zeros((len(chunk), max_length, input_dim), dtype=torch.float32)
-        for index, (_, rollout, _) in enumerate(chunk):
-            length = len(rollout.hidden_states)
-            features[index, :length] = rollout.hidden_states
-        with torch.no_grad():
-            padded = model({"features": features.to("cuda")}).squeeze(-1)
-        for index, (_, rollout, _) in enumerate(chunk):
-            length = len(rollout.hidden_states)
-            values = padded[index, :length].detach().cpu().numpy().astype(np.float32)
-            scores.append(values)
+            pending_rollouts.append((label, rollout, completion))
+        while len(pending_rollouts) >= args.batch_size:
+            score_pending(args.batch_size)
+    if pending_rollouts:
+        score_pending(len(pending_rollouts))
+    scored_rollouts.sort(key=lambda item: item[:3])
 
     maximum_length = bands.shape[1]
     padded_scores = np.full(
-        (len(indexed_rollouts), maximum_length), np.nan, dtype=np.float32
+        (len(scored_rollouts), maximum_length), np.nan, dtype=np.float32
     )
     records = []
-    for row, ((label, rollout, completion), values) in enumerate(
-        zip(indexed_rollouts, scores)
+    for row, (label, task_id, episode_index, completion, values) in enumerate(
+        scored_rollouts
     ):
         if len(values) > maximum_length:
             raise ValueError("fault trace is longer than the frozen monitor band")
@@ -280,15 +300,15 @@ def main() -> None:
         records.append(
             {
                 "run": label,
-                "task_id": int(rollout.task_id),
-                "episode_index": int(rollout.episode_idx),
+                "task_id": task_id,
+                "episode_index": episode_index,
                 "condition": str(completion["condition"]),
                 "success": bool(completion["success"]),
                 "length": len(values),
                 "fault": fault,
                 "score_validity": {
                     "all_finite": not bool(len(nonfinite_steps)),
-                    "nonfinite_count": int(len(nonfinite_steps)),
+                    "nonfinite_count": len(nonfinite_steps),
                     "first_nonfinite_step": (
                         int(nonfinite_steps[0]) if len(nonfinite_steps) else None
                     ),
@@ -313,15 +333,17 @@ def main() -> None:
     with temporary_scores.open("wb") as file:
         np.savez_compressed(
             file,
-            runs=np.asarray([item[0] for item in indexed_rollouts]),
-            task_ids=np.asarray([item[1].task_id for item in indexed_rollouts], dtype=np.int16),
+            runs=np.asarray([item[0] for item in scored_rollouts]),
+            task_ids=np.asarray([item[1] for item in scored_rollouts], dtype=np.int16),
             episode_indices=np.asarray(
-                [item[1].episode_idx for item in indexed_rollouts], dtype=np.int16
+                [item[2] for item in scored_rollouts], dtype=np.int16
             ),
             successes=np.asarray(
-                [item[2]["success"] for item in indexed_rollouts], dtype=bool
+                [item[3]["success"] for item in scored_rollouts], dtype=bool
             ),
-            lengths=np.asarray([len(values) for values in scores], dtype=np.int16),
+            lengths=np.asarray(
+                [len(item[4]) for item in scored_rollouts], dtype=np.int16
+            ),
             scores=padded_scores,
             alphas=np.asarray(alphas, dtype=np.float32),
             bands=bands.astype(np.float32),
@@ -377,7 +399,7 @@ def main() -> None:
     )
     if primary_index is None:
         raise ValueError("primary SAFE alpha is absent from the frozen threshold band")
-    for (label, _rollout, completion), values in zip(indexed_rollouts, scores):
+    for label, _task_id, _episode_index, completion, values in scored_rollouts:
         evidence = completion.get("evidence_graph")
         if not isinstance(evidence, dict):
             continue

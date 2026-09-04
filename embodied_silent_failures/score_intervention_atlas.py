@@ -60,6 +60,25 @@ def _write_split(
         value for value in contexts if value["context"]["analysis_split"] == split
     ]
     context_ids = {str(value["context_id"]) for value in selected_contexts}
+    selected_checks = [
+        value
+        for value in metadata["composition_audit"]["checks"]
+        if str(value["context_id"]) in context_ids
+    ]
+    split_metadata = {
+        **metadata,
+        "composition_audit": {
+            "physical_branches_checked": len(selected_checks),
+            "feature_exact_branches": sum(
+                bool(value["feature_exact_equal"]) for value in selected_checks
+            ),
+            "alarm_exact_branches": sum(
+                bool(value.get("alarm_timeline_exact_equal"))
+                for value in selected_checks
+            ),
+            "checks": selected_checks,
+        },
+    }
     selected_records = [
         value for value in records if str(value["context_id"]) in context_ids
     ]
@@ -97,7 +116,7 @@ def _write_split(
         )
     temporary.replace(archive_path)
     output = {
-        **metadata,
+        **split_metadata,
         "analysis_split": split,
         "score_archive": {
             "path": str(archive_path.resolve()),
