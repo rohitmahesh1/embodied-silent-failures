@@ -27,6 +27,7 @@ class ExtractAtlasActionMonitorGeometryTests(unittest.TestCase):
         result = _fault_provenance(completion)
 
         self.assertEqual(result["stale_logit_source_step"], 9)
+        self.assertEqual(result["stale_logit_token_index"], 6)
         self.assertFalse(result["same_feature_comparable"])
 
     def test_shared_site_is_same_feature_comparable(self) -> None:
@@ -47,6 +48,7 @@ class ExtractAtlasActionMonitorGeometryTests(unittest.TestCase):
         result = _fault_provenance(completion)
 
         self.assertIsNone(result["stale_logit_source_step"])
+        self.assertIsNone(result["stale_logit_token_index"])
         self.assertTrue(result["same_feature_comparable"])
 
 

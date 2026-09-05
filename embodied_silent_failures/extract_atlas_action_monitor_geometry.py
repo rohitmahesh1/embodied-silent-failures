@@ -109,6 +109,7 @@ def _fault_provenance(completion: dict[str, Any]) -> dict[str, Any]:
     identity = local.get("identity")
     topologies = [str(value) for value in local.get("topologies", [])]
     stale_logit_source_step = None
+    stale_logit_token_index = None
     if (
         isinstance(identity, dict)
         and identity.get("kind") == "module_output"
@@ -116,12 +117,14 @@ def _fault_provenance(completion: dict[str, Any]) -> dict[str, Any]:
         and identity.get("output_port") == "value.logits"
     ):
         stale_logit_source_step = int(fault["source_policy_step"])
+        stale_logit_token_index = int(identity["module_call_index"])
     return {
         "identity": identity,
         "topologies": topologies,
         "same_feature_comparable": topologies
         == ["shared_action_and_monitor_evidence"],
         "stale_logit_source_step": stale_logit_source_step,
+        "stale_logit_token_index": stale_logit_token_index,
     }
 
 
@@ -244,14 +247,20 @@ def _branch_data(
     completion, trajectory_path, feature_path = _one_completion(attempt_dir)
     trajectory = _trajectory_window(np, trajectory_path, steps)
     fault_provenance = _fault_provenance(completion)
-    hidden_steps = list(steps)
+    hidden = _hidden_window(feature_path, steps, torch)
     if fault_provenance["stale_logit_source_step"] is not None:
         # The graph records policy.value.logits as an action-only boundary. At
         # this site x_t <- x_(t-1) changes generated logits after the current
         # hidden feature is computed, so recover its missing logits from the
         # mechanically recorded source step rather than the unchanged x_t feature.
-        hidden_steps[0] = int(fault_provenance["stale_logit_source_step"])
-    hidden = _hidden_window(feature_path, hidden_steps, torch)
+        source = _hidden_window(
+            feature_path,
+            [int(fault_provenance["stale_logit_source_step"])],
+            torch,
+        )
+        token = int(fault_provenance["stale_logit_token_index"])
+        hidden = hidden.clone()
+        hidden[0, token] = source[0, token]
     logits, recovery = recover_action_logits(
         np,
         torch,
