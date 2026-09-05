@@ -42,10 +42,14 @@ def main() -> None:
     errors = []
     seen = set()
     sources = []
+    excluded_reference_controls = 0
     for path in args.alignment:
         artifact = load_json(path)
         for row in artifact["records"]:
             run = str(row["run"])
+            if run == f"{row['context_id']}-control":
+                excluded_reference_controls += 1
+                continue
             if run in seen:
                 raise ValueError(f"duplicate physical continuation: {run}")
             seen.add(run)
@@ -112,6 +116,7 @@ def main() -> None:
             ),
         },
         "sources": sources,
+        "excluded_reference_controls": excluded_reference_controls,
         "extraction_errors": errors,
         **analysis,
     }

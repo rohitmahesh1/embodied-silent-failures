@@ -7,6 +7,7 @@ import numpy as np
 from embodied_silent_failures.atlas_path_alignment import (
     align_at_horizon,
     align_state_stream,
+    is_reference_control,
 )
 from embodied_silent_failures.atlas_path_analysis import (
     exact_rejoin_diagnosis,
@@ -31,6 +32,21 @@ def _trajectory(steps, values):
 
 
 class AtlasPathAlignmentTests(unittest.TestCase):
+    def test_reference_control_is_not_a_faulted_continuation(self) -> None:
+        self.assertTrue(
+            is_reference_control(
+                {"run": "c0001-control", "control_run": "c0001-control"}
+            )
+        )
+        self.assertFalse(
+            is_reference_control(
+                {
+                    "run": "c0001-command-abcd",
+                    "control_run": "c0001-control",
+                }
+            )
+        )
+
     def test_alignment_recovers_a_branch_that_is_one_step_behind(self) -> None:
         control = _trajectory([10, 11, 12, 13], [[0.0], [1.0], [2.0], [3.0]])
         faulted = _trajectory([10, 11, 12, 13], [[0.0], [0.0], [1.0], [2.0]])

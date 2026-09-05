@@ -12,6 +12,7 @@ from embodied_silent_failures.atlas_path_alignment import (
     HORIZONS,
     STATE_STREAMS,
     extract_pair_alignments,
+    is_reference_control,
     load_state_trajectory,
     one_completion,
 )
@@ -49,7 +50,11 @@ def main() -> None:
         str(record["context_id"]): record for record in mechanisms["contexts"]
     }
     by_context: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    reference_controls = 0
     for physical in mechanisms["physical_pairs"]:
+        if is_reference_control(physical):
+            reference_controls += 1
+            continue
         by_context[str(physical["context_id"])].append(physical)
 
     records = []
@@ -133,7 +138,8 @@ def main() -> None:
                 "smallest absolute then earliest signed policy-step offset"
             ),
             "selection": (
-                "all physical continuations in the supplied mechanism artifact; "
+                "all non-control physical continuations in the supplied mechanism "
+                "artifact; the successful reference control is only the path and "
                 "terminal outcome is not used to align states"
             ),
             "failure_handling": (
@@ -153,6 +159,7 @@ def main() -> None:
         "coverage": {
             "declared_contexts": len(by_context),
             "loaded_controls": len(control_sources),
+            "excluded_reference_controls": reference_controls,
             "declared_physical_pairs": sum(map(len, by_context.values())),
             "extracted_physical_pairs": len(records),
             "errors": len(errors),

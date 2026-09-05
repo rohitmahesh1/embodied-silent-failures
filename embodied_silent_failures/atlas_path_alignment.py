@@ -12,6 +12,10 @@ ALIGNMENT_WINDOWS = (5, 10, 25)
 STATE_STREAMS = ("simulator_state", "object-state", "robot0_proprio-state")
 
 
+def is_reference_control(physical: dict[str, Any]) -> bool:
+    return str(physical["run"]) == str(physical["control_run"])
+
+
 def one_completion(attempt_dir: Path) -> tuple[dict[str, Any], Path]:
     completions = list(attempt_dir.glob("*.complete.json"))
     if len(completions) != 1:
