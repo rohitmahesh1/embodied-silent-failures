@@ -31,6 +31,7 @@ class ActionMonitorAnalysisTests(unittest.TestCase):
     def test_rank_mismatch_cutoff_is_fit_on_development(self) -> None:
         development = [
             {
+                "context_id": "development",
                 "same_feature_action_js_at_fault": float(index),
                 "absolute_safe_response_at_fault": float(10 - index),
                 "policy_failure": index > 7,
@@ -60,8 +61,17 @@ class ActionMonitorAnalysisTests(unittest.TestCase):
     def test_rank_mismatch_accepts_broader_policy_measure_and_outcomes(self) -> None:
         development = [
             {
+                "context_id": "development",
                 "command_change": float(index),
                 "absolute_safe_response_at_fault": float(10 - index),
+                "policy_failure": index > 7,
+                "outcome_group": (
+                    "silent_failure"
+                    if index == 9
+                    else "detected_failure"
+                    if index == 8
+                    else "successful_continuation"
+                ),
             }
             for index in range(10)
         ]

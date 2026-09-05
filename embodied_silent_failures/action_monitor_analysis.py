@@ -173,6 +173,14 @@ def rank_mismatch_diagnostic(
                 bootstrap_samples=bootstrap_samples,
                 seed=seed + offset,
             ),
+            "development_within_context": within_context_concordance(
+                development,
+                development_scores.tolist(),
+                positive=positive,
+                negative=negative,
+                bootstrap_samples=bootstrap_samples,
+                seed=seed + 100 + offset,
+            ),
         }
 
     terminal = outcome(
