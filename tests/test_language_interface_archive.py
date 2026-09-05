@@ -151,6 +151,7 @@ class LanguageInterfaceArchiveTests(unittest.TestCase):
             log_normalizer=torch.full((7,), offset),
             entropy=torch.full((7,), offset),
             vocabulary_size=32000,
+            model_output_size=32064,
             action_token_start=31744,
         )
         command = self.np.full((7,), offset)

@@ -22,6 +22,7 @@ class GenerationLogitTrace:
     log_normalizer: Any
     entropy: Any
     vocabulary_size: int
+    model_output_size: int
     action_token_start: int
 
 
@@ -47,31 +48,53 @@ def extract_hidden_states(runtime: Runtime, generated: Any) -> Any:
     return result
 
 
-def generation_logit_trace(runtime: Runtime, generated: Any) -> GenerationLogitTrace:
+def action_vocabulary_bounds(model: Any, model_output_size: int) -> tuple[int, int]:
+    # OpenVLA 300dce26, modeling_prismatic.py::OpenVLAForActionPrediction,
+    # removes config.pad_to_multiple_of from text_config.vocab_size before
+    # decoding actions. The language head still emits those padded entries, so
+    # the action vocabulary is not necessarily the final 256 model outputs.
+    vocabulary_size = int(model.vocab_size)
+    action_bins = int(model.config.n_action_bins)
+    if action_bins != 256:
+        raise ValueError(f"unexpected OpenVLA action vocabulary size: {action_bins}")
+    start = vocabulary_size - action_bins
+    stop = vocabulary_size
+    if not 0 <= start < stop <= int(model_output_size):
+        raise ValueError(
+            "OpenVLA action vocabulary is outside the language-head output: "
+            f"[{start}, {stop}) of {model_output_size}"
+        )
+    return start, stop
+
+
+def generation_logit_trace(
+    runtime: Runtime, model: Any, generated: Any
+) -> GenerationLogitTrace:
     # SAFE OpenVLA 300dce26, modeling_prismatic.py::predict_action, decodes
-    # actions from the final 256 vocabulary entries. Keep that complete action
-    # vocabulary plus the global top tokens and exact normalization summaries;
-    # this avoids archiving the unrelated full language vocabulary per fault.
+    # actions from the 256 entries immediately below model.vocab_size. Keep that
+    # complete action vocabulary plus global top tokens and exact normalization
+    # summaries; this avoids archiving the unrelated language vocabulary.
     values = [value[0].detach().to(runtime.torch.float32) for value in generated["logits"]]
     logits = runtime.torch.stack(values, dim=0)
     if logits.ndim != 2 or logits.shape[0] != 7 or logits.shape[1] < 256:
         raise ValueError(f"unexpected OpenVLA logit shape: {tuple(logits.shape)}")
+    action_start, action_stop = action_vocabulary_bounds(model, int(logits.shape[1]))
     top_count = min(32, int(logits.shape[1]))
     top_logits, top_ids = runtime.torch.topk(logits, k=top_count, dim=-1)
     log_normalizer = runtime.torch.logsumexp(logits, dim=-1)
     probabilities = runtime.torch.softmax(logits, dim=-1)
     log_probabilities = runtime.torch.log_softmax(logits, dim=-1)
     entropy = -(probabilities * log_probabilities).sum(dim=-1)
-    vocabulary_size = int(logits.shape[1])
     return GenerationLogitTrace(
         sequence_token_ids=generated["sequences"][0].detach().cpu(),
-        action_token_logits=logits[:, -256:].detach().cpu(),
+        action_token_logits=logits[:, action_start:action_stop].detach().cpu(),
         top_token_ids=top_ids.detach().cpu(),
         top_token_logits=top_logits.detach().cpu(),
         log_normalizer=log_normalizer.detach().cpu(),
         entropy=entropy.detach().cpu(),
-        vocabulary_size=vocabulary_size,
-        action_token_start=vocabulary_size - 256,
+        vocabulary_size=int(model.vocab_size),
+        model_output_size=int(logits.shape[1]),
+        action_token_start=action_start,
     )
 
 
@@ -143,7 +166,7 @@ def policy_decision(
         command=runtime.np.asarray(command).copy(),
         action_tokens=tuple(int(value) for value in action_tokens.tolist()),
         hidden_states=extract_hidden_states(runtime, generated),
-        generation_logits=generation_logit_trace(runtime, generated),
+        generation_logits=generation_logit_trace(runtime, model, generated),
         trace=injector.last_trace if injector is not None else None,
         inference_seconds=inference_seconds,
     )

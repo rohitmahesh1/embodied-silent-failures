@@ -38,6 +38,9 @@ class LanguageTrajectoryArchiveTests(unittest.TestCase):
                     self.np.full((7,), step, dtype=self.np.float32)
                 ),
                 entropy=tensor(self.np.full((7,), step, dtype=self.np.float32)),
+                vocabulary_size=32000,
+                model_output_size=32064,
+                action_token_start=31744,
             )
             decision = SimpleNamespace(
                 raw_action=self.np.full((7,), step, dtype=self.np.float32),
@@ -85,6 +88,9 @@ class LanguageTrajectoryArchiveTests(unittest.TestCase):
                 self.assertEqual(archive[image_record["archive_key"]].shape, (3, 2, 2, 3))
             self.assertEqual(record["snapshot_count"], 3)
             self.assertEqual(record["decision_count"], 2)
+            self.assertEqual(
+                record["policy_evidence"]["action_token_start"], 31744
+            )
 
 
 if __name__ == "__main__":

@@ -120,7 +120,7 @@ def atlas_policy_decision(
         hidden_states = hidden_states.clone()
         hidden_states[-1] = monitor_input
     sequence_tokens = action_tokens.detach().cpu().reshape(-1)
-    logits = generation_logit_trace(runtime, generated)
+    logits = generation_logit_trace(runtime, model, generated)
     logits = replace(
         logits,
         sequence_token_ids=policy_call["sequences"][0].detach().cpu(),

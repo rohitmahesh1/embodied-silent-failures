@@ -25,6 +25,7 @@ class TrajectoryRecorder:
     top_token_logits: list[Any] = field(default_factory=list)
     log_normalizers: list[Any] = field(default_factory=list)
     entropies: list[Any] = field(default_factory=list)
+    generation_schemas: list[tuple[int, int, int]] = field(default_factory=list)
 
     def append(
         self,
@@ -71,6 +72,13 @@ class TrajectoryRecorder:
         self.top_token_logits.append(logits.top_token_logits.numpy().copy())
         self.log_normalizers.append(logits.log_normalizer.numpy().copy())
         self.entropies.append(logits.entropy.numpy().copy())
+        self.generation_schemas.append(
+            (
+                int(logits.vocabulary_size),
+                int(logits.model_output_size),
+                int(logits.action_token_start),
+            )
+        )
 
     def write(self, path: Path) -> dict[str, Any]:
         if not self.simulator_states:
@@ -82,6 +90,9 @@ class TrajectoryRecorder:
             "simulator_state": np.stack(self.simulator_states, axis=0),
         }
         if self.decision_policy_steps:
+            generation_schema = self.generation_schemas[0]
+            if any(value != generation_schema for value in self.generation_schemas):
+                raise ValueError("OpenVLA generation schema changed during the rollout")
             arrays.update(
                 {
                     "decision_policy_step": np.asarray(
@@ -167,6 +178,21 @@ class TrajectoryRecorder:
                     "generated action tokens at every post-intervention decision"
                 ),
                 "global_top_tokens": 32,
+                "decoder_vocabulary_size": (
+                    self.generation_schemas[0][0]
+                    if self.generation_schemas
+                    else None
+                ),
+                "model_output_size": (
+                    self.generation_schemas[0][1]
+                    if self.generation_schemas
+                    else None
+                ),
+                "action_token_start": (
+                    self.generation_schemas[0][2]
+                    if self.generation_schemas
+                    else None
+                ),
                 "normalization": "exact full-vocabulary logsumexp and entropy",
             },
         }
