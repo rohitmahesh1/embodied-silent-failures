@@ -37,11 +37,84 @@ def rank_cdf(reference: list[float], values: list[float]) -> list[float]:
     ).tolist()
 
 
+def within_context_concordance(
+    rows: list[dict[str, Any]],
+    values: list[float],
+    *,
+    positive: Any,
+    negative: Any,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, Any]:
+    import numpy as np
+
+    if len(rows) != len(values):
+        raise ValueError("rows and values must have equal length")
+    grouped: dict[str, list[tuple[bool, float]]] = defaultdict(list)
+    for row, value in zip(rows, values, strict=True):
+        if positive(row) or negative(row):
+            grouped[str(row["context_id"])].append((bool(positive(row)), value))
+
+    comparable = []
+    for members in grouped.values():
+        positives = [value for label, value in members if label]
+        negatives = [value for label, value in members if not label]
+        if not positives or not negatives:
+            continue
+        wins = sum(left > right for left in positives for right in negatives)
+        ties = sum(left == right for left in positives for right in negatives)
+        pairs = len(positives) * len(negatives)
+        comparable.append((pairs, (wins + 0.5 * ties) / pairs))
+
+    def estimates(groups: list[tuple[int, float]]) -> tuple[float, float]:
+        pair_weighted = sum(pairs * score for pairs, score in groups) / sum(
+            pairs for pairs, _score in groups
+        )
+        context_equal = sum(score for _pairs, score in groups) / len(groups)
+        return pair_weighted, context_equal
+
+    if not comparable:
+        return {
+            "comparable_contexts": 0,
+            "failed_success_pairs": 0,
+            "pair_weighted_concordance": None,
+            "context_equal_mean_concordance": None,
+            "bootstrap_interval_95": None,
+        }
+    pair_weighted, context_equal = estimates(comparable)
+    rng = random.Random(seed)
+    bootstrap = []
+    for _ in range(bootstrap_samples):
+        sampled = [
+            comparable[rng.randrange(len(comparable))]
+            for _index in range(len(comparable))
+        ]
+        bootstrap.append(estimates(sampled))
+    return {
+        "comparable_contexts": len(comparable),
+        "failed_success_pairs": sum(pairs for pairs, _score in comparable),
+        "pair_weighted_concordance": pair_weighted,
+        "context_equal_mean_concordance": context_equal,
+        "bootstrap_interval_95": {
+            "pair_weighted": [
+                float(np.quantile([value[0] for value in bootstrap], 0.025)),
+                float(np.quantile([value[0] for value in bootstrap], 0.975)),
+            ],
+            "context_equal": [
+                float(np.quantile([value[1] for value in bootstrap], 0.025)),
+                float(np.quantile([value[1] for value in bootstrap], 0.975)),
+            ],
+        },
+    }
+
+
 def rank_mismatch_diagnostic(
     development: list[dict[str, Any]],
     holdout: list[dict[str, Any]],
     *,
     action_metric: str = ACTION_METRIC,
+    bootstrap_samples: int = 2_000,
+    seed: int = 20260905,
 ) -> dict[str, Any]:
     import numpy as np
     from sklearn.metrics import roc_auc_score
@@ -62,7 +135,7 @@ def rank_mismatch_diagnostic(
     holdout_scores = scores(holdout)
     cutoff = float(np.quantile(development_scores, 0.8))
     selected = holdout_scores >= cutoff
-    def outcome(positive: Any, negative: Any) -> dict[str, Any]:
+    def outcome(positive: Any, negative: Any, offset: int) -> dict[str, Any]:
         eligible = np.asarray(
             [bool(positive(row) or negative(row)) for row in holdout]
         )
@@ -92,11 +165,20 @@ def rank_mismatch_diagnostic(
                     else None
                 ),
             },
+            "within_context": within_context_concordance(
+                holdout,
+                holdout_scores.tolist(),
+                positive=positive,
+                negative=negative,
+                bootstrap_samples=bootstrap_samples,
+                seed=seed + offset,
+            ),
         }
 
     terminal = outcome(
         lambda row: bool(row["policy_failure"]),
         lambda row: not bool(row["policy_failure"]),
+        0,
     )
     return {
         "action_metric": action_metric,
@@ -118,10 +200,12 @@ def rank_mismatch_diagnostic(
             "silent_vs_detected_failure": outcome(
                 lambda row: row.get("outcome_group") == "silent_failure",
                 lambda row: row.get("outcome_group") == "detected_failure",
+                1,
             ),
             "silent_failure_vs_all_other": outcome(
                 lambda row: row.get("outcome_group") == "silent_failure",
                 lambda row: row.get("outcome_group") != "silent_failure",
+                2,
             ),
         },
     }

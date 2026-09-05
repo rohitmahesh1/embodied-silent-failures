@@ -9,6 +9,7 @@ from embodied_silent_failures.action_monitor_analysis import (
     coupling_summary,
     nested_holdout_models,
     rank_mismatch_diagnostic,
+    within_context_concordance,
 )
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.provenance import file_sha256, git_state, load_json
@@ -190,8 +191,10 @@ def main() -> None:
             split_rows["development"],
             split_rows["holdout"],
             action_metric=metric,
+            bootstrap_samples=args.bootstrap_samples,
+            seed=args.seed + 500 + index,
         )
-        for metric in POLICY_MEASURES
+        for index, metric in enumerate(POLICY_MEASURES)
     }
     nested_models = {
         metric: nested_holdout_models(
@@ -202,6 +205,20 @@ def main() -> None:
             action_metric=metric,
         )
         for index, metric in enumerate(POLICY_MEASURES)
+    }
+    within_context = {
+        split: {
+            metric: within_context_concordance(
+                selected,
+                [float(row[metric]) for row in selected],
+                positive=lambda row: bool(row["policy_failure"]),
+                negative=lambda row: not bool(row["policy_failure"]),
+                bootstrap_samples=args.bootstrap_samples,
+                seed=args.seed + 2_000 + 100 * split_index + metric_index,
+            )
+            for metric_index, metric in enumerate(POLICY_MEASURES)
+        }
+        for split_index, (split, selected) in enumerate(split_rows.items())
     }
     output = {
         "schema_version": 2,
@@ -282,6 +299,7 @@ def main() -> None:
         },
         "rank_mismatch_by_policy_measure": rank_mismatch,
         "nested_holdout_models_by_policy_measure": nested_models,
+        "within_context_policy_measure_concordance": within_context,
     }
     write_json_atomic(args.output, output)
     print(json.dumps(output, indent=2, sort_keys=True))
