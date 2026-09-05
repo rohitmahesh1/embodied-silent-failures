@@ -51,6 +51,35 @@ class ExtractAtlasActionMonitorGeometryTests(unittest.TestCase):
         self.assertIsNone(result["stale_logit_token_index"])
         self.assertTrue(result["same_feature_comparable"])
 
+    def test_overwritten_decoder_outputs_use_recorded_source_step(self) -> None:
+        identities = (
+            ("policy.language_model.model", "value.last_hidden_state"),
+            ("policy.language_model", "value.logits"),
+            ("policy.language_model.lm_head", "value"),
+        )
+        for module_path, output_port in identities:
+            with self.subTest(module_path=module_path, output_port=output_port):
+                completion = {
+                    "fault": {
+                        "source_policy_step": 4,
+                        "representative_local_measurements": {
+                            "identity": {
+                                "kind": "module_output",
+                                "module_call_index": 2,
+                                "module_path": module_path,
+                                "output_port": output_port,
+                            },
+                            "topologies": ["shared_action_and_monitor_evidence"],
+                        },
+                    }
+                }
+
+                result = _fault_provenance(completion)
+
+                self.assertEqual(result["stale_logit_source_step"], 4)
+                self.assertEqual(result["stale_logit_token_index"], 2)
+                self.assertTrue(result["same_feature_comparable"])
+
 
 if __name__ == "__main__":
     unittest.main()

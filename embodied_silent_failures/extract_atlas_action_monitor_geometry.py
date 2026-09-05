@@ -110,11 +110,20 @@ def _fault_provenance(completion: dict[str, Any]) -> dict[str, Any]:
     topologies = [str(value) for value in local.get("topologies", [])]
     stale_logit_source_step = None
     stale_logit_token_index = None
+    # Campaign 61ef417 records x_t <- x_(t-1) at the selected module output.
+    # For these pinned OpenVLA 300dce26 outputs, the hook overwrites the value
+    # used by the decoder after the archived hidden-state tuple was formed.
+    overwritten_decoder_outputs = {
+        ("policy.language_model.model", "value.last_hidden_state"),
+        ("policy.language_model", "value.logits"),
+        ("policy.language_model.lm_head", "value"),
+        ("policy", "value.logits"),
+    }
     if (
         isinstance(identity, dict)
         and identity.get("kind") == "module_output"
-        and identity.get("module_path") == "policy"
-        and identity.get("output_port") == "value.logits"
+        and (identity.get("module_path"), identity.get("output_port"))
+        in overwritten_decoder_outputs
     ):
         stale_logit_source_step = int(fault["source_policy_step"])
         stale_logit_token_index = int(identity["module_call_index"])
