@@ -54,6 +54,47 @@ class ActionMonitorAnalysisTests(unittest.TestCase):
         self.assertEqual(result["holdout_roc_auc"], 1.0)
         self.assertEqual(result["holdout_top_fifth"]["failures"], 1)
 
+    def test_rank_mismatch_accepts_broader_policy_measure_and_outcomes(self) -> None:
+        development = [
+            {
+                "command_change": float(index),
+                "absolute_safe_response_at_fault": float(10 - index),
+            }
+            for index in range(10)
+        ]
+        holdout = [
+            {
+                "command_change": 9.0,
+                "absolute_safe_response_at_fault": 1.0,
+                "policy_failure": True,
+                "outcome_group": "silent_failure",
+            },
+            {
+                "command_change": 1.0,
+                "absolute_safe_response_at_fault": 9.0,
+                "policy_failure": True,
+                "outcome_group": "detected_failure",
+            },
+            {
+                "command_change": 2.0,
+                "absolute_safe_response_at_fault": 8.0,
+                "policy_failure": False,
+                "outcome_group": "successful_continuation",
+            },
+        ]
+
+        result = rank_mismatch_diagnostic(
+            development, holdout, action_metric="command_change"
+        )
+
+        self.assertEqual(result["action_metric"], "command_change")
+        self.assertEqual(
+            result["outcomes"]["silent_vs_detected_failure"]["roc_auc"], 1.0
+        )
+        self.assertEqual(
+            result["outcomes"]["silent_failure_vs_all_other"]["roc_auc"], 1.0
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

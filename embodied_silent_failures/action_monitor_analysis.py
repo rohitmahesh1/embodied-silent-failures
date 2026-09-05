@@ -38,17 +38,20 @@ def rank_cdf(reference: list[float], values: list[float]) -> list[float]:
 
 
 def rank_mismatch_diagnostic(
-    development: list[dict[str, Any]], holdout: list[dict[str, Any]]
+    development: list[dict[str, Any]],
+    holdout: list[dict[str, Any]],
+    *,
+    action_metric: str = ACTION_METRIC,
 ) -> dict[str, Any]:
     import numpy as np
     from sklearn.metrics import roc_auc_score
 
-    action_reference = [float(row[ACTION_METRIC]) for row in development]
+    action_reference = [float(row[action_metric]) for row in development]
     monitor_reference = [float(row[MONITOR_METRIC]) for row in development]
 
     def scores(rows: list[dict[str, Any]]) -> Any:
         action_rank = np.asarray(
-            rank_cdf(action_reference, [float(row[ACTION_METRIC]) for row in rows])
+            rank_cdf(action_reference, [float(row[action_metric]) for row in rows])
         )
         monitor_rank = np.asarray(
             rank_cdf(monitor_reference, [float(row[MONITOR_METRIC]) for row in rows])
@@ -59,29 +62,66 @@ def rank_mismatch_diagnostic(
     holdout_scores = scores(holdout)
     cutoff = float(np.quantile(development_scores, 0.8))
     selected = holdout_scores >= cutoff
-    labels = np.asarray([int(row["policy_failure"]) for row in holdout])
-    overall_rate = float(labels.mean()) if len(labels) else None
-    selected_rate = float(labels[selected].mean()) if selected.any() else None
+    def outcome(positive: Any, negative: Any) -> dict[str, Any]:
+        eligible = np.asarray(
+            [bool(positive(row) or negative(row)) for row in holdout]
+        )
+        labels = np.asarray([int(positive(row)) for row in holdout])[eligible]
+        outcome_scores = holdout_scores[eligible]
+        outcome_selected = selected[eligible]
+        overall_rate = float(labels.mean()) if len(labels) else None
+        selected_rate = (
+            float(labels[outcome_selected].mean()) if outcome_selected.any() else None
+        )
+        return {
+            "eligible_continuations": int(eligible.sum()),
+            "positive_outcomes": int(labels.sum()),
+            "roc_auc": (
+                float(roc_auc_score(labels, outcome_scores))
+                if len(set(labels.tolist())) == 2
+                else None
+            ),
+            "selected": {
+                "continuations": int(outcome_selected.sum()),
+                "positive_outcomes": int(labels[outcome_selected].sum()),
+                "positive_rate": selected_rate,
+                "overall_positive_rate": overall_rate,
+                "enrichment": (
+                    selected_rate / overall_rate
+                    if selected_rate is not None and overall_rate
+                    else None
+                ),
+            },
+        }
+
+    terminal = outcome(
+        lambda row: bool(row["policy_failure"]),
+        lambda row: not bool(row["policy_failure"]),
+    )
     return {
+        "action_metric": action_metric,
         "definition": (
-            "development empirical rank of same-feature action divergence minus "
+            f"development empirical rank of {action_metric} minus "
             "development empirical rank of absolute SAFE response at the fault step"
         ),
         "development_top_fifth_cutoff": cutoff,
-        "holdout_roc_auc": (
-            float(roc_auc_score(labels, holdout_scores))
-            if len(set(labels.tolist())) == 2
-            else None
-        ),
+        "holdout_roc_auc": terminal["roc_auc"],
         "holdout_top_fifth": {
-            "continuations": int(selected.sum()),
-            "failures": int(labels[selected].sum()),
-            "failure_rate": selected_rate,
-            "overall_failure_rate": overall_rate,
-            "enrichment": (
-                selected_rate / overall_rate
-                if selected_rate is not None and overall_rate
-                else None
+            "continuations": terminal["selected"]["continuations"],
+            "failures": terminal["selected"]["positive_outcomes"],
+            "failure_rate": terminal["selected"]["positive_rate"],
+            "overall_failure_rate": terminal["selected"]["overall_positive_rate"],
+            "enrichment": terminal["selected"]["enrichment"],
+        },
+        "outcomes": {
+            "terminal_failure_vs_success": terminal,
+            "silent_vs_detected_failure": outcome(
+                lambda row: row.get("outcome_group") == "silent_failure",
+                lambda row: row.get("outcome_group") == "detected_failure",
+            ),
+            "silent_failure_vs_all_other": outcome(
+                lambda row: row.get("outcome_group") == "silent_failure",
+                lambda row: row.get("outcome_group") != "silent_failure",
             ),
         },
     }
@@ -94,10 +134,12 @@ def _numeric_value(row: dict[str, Any], name: str) -> float:
     return math.log1p(value)
 
 
-def _fit_design_state(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _fit_design_state(
+    rows: list[dict[str, Any]], action_metric: str
+) -> dict[str, Any]:
     import numpy as np
 
-    names = (DISTANCE_METRIC, ACTION_METRIC, MONITOR_METRIC)
+    names = (DISTANCE_METRIC, action_metric, MONITOR_METRIC)
     values = np.asarray(
         [[_numeric_value(row, name) for name in names] for row in rows]
     )
@@ -231,11 +273,12 @@ def nested_holdout_models(
     *,
     bootstrap_samples: int,
     seed: int,
+    action_metric: str = ACTION_METRIC,
 ) -> dict[str, Any]:
     import numpy as np
     from sklearn.linear_model import LogisticRegression
 
-    state = _fit_design_state(development)
+    state = _fit_design_state(development, action_metric)
     development_labels = np.asarray(
         [int(row["policy_failure"]) for row in development]
     )
@@ -266,7 +309,7 @@ def nested_holdout_models(
                 "not confirmation"
             ),
             "baseline": "task, phase, and fault-step SAFE-input displacement",
-            "action": "baseline plus same-feature action-distribution divergence",
+            "action": f"baseline plus {action_metric}",
             "joint": "action model plus absolute fault-step SAFE response",
             "interaction": "joint model plus action-by-monitor interaction",
             "numeric_transform": "log1p followed by development-set standardization",
@@ -284,7 +327,9 @@ def nested_holdout_models(
     }
 
 
-def coupling_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def coupling_summary(
+    rows: list[dict[str, Any]], *, action_metric: str = ACTION_METRIC
+) -> dict[str, Any]:
     from scipy.stats import spearmanr
 
     output = {}
@@ -297,7 +342,7 @@ def coupling_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
     for name, selected in groups.items():
         statistic = spearmanr(
-            [float(row[ACTION_METRIC]) for row in selected],
+            [float(row[action_metric]) for row in selected],
             [float(row[MONITOR_METRIC]) for row in selected],
         )
         output[name] = {

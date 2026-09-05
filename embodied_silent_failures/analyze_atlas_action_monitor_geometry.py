@@ -30,6 +30,12 @@ ACTION_METRICS = (
     "executed_command_l2_energy",
 )
 
+POLICY_MEASURES = (
+    "same_feature_action_js_at_fault",
+    "full_action_mean_js_at_fault",
+    "executed_command_l2_at_fault",
+)
+
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -104,10 +110,19 @@ def _load_shard(
 def _metric_comparisons(rows: list[dict], samples: int, seed: int) -> dict:
     failed = lambda row: bool(row["policy_failure"])
     succeeded = lambda row: not bool(row["policy_failure"])
+    silent = lambda row: row["outcome_group"] == "silent_failure"
+    detected = lambda row: row["outcome_group"] == "detected_failure"
+    not_silent = lambda row: row["outcome_group"] != "silent_failure"
     return {
         metric: {
             "failure_vs_success": binary_metric_summary(
                 rows, metric=metric, positive=failed, negative=succeeded
+            ),
+            "silent_vs_detected_failure": binary_metric_summary(
+                rows, metric=metric, positive=silent, negative=detected
+            ),
+            "silent_failure_vs_all_other": binary_metric_summary(
+                rows, metric=metric, positive=silent, negative=not_silent
             ),
             "failure_vs_success_trajectory_bootstrap": trajectory_bootstrap_auc(
                 rows,
@@ -170,8 +185,26 @@ def main() -> None:
         split: [row for row in comparable_rows if row["analysis_split"] == split]
         for split in ("development", "holdout")
     }
+    rank_mismatch = {
+        metric: rank_mismatch_diagnostic(
+            split_rows["development"],
+            split_rows["holdout"],
+            action_metric=metric,
+        )
+        for metric in POLICY_MEASURES
+    }
+    nested_models = {
+        metric: nested_holdout_models(
+            split_rows["development"],
+            split_rows["holdout"],
+            bootstrap_samples=args.bootstrap_samples,
+            seed=args.seed + 1_000 + index,
+            action_metric=metric,
+        )
+        for index, metric in enumerate(POLICY_MEASURES)
+    }
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
         "analysis": "same-feature OpenVLA action sensitivity and SAFE response",
         "analysis_code": {
             **git_state(Path(__file__).resolve().parents[1]),
@@ -183,25 +216,36 @@ def main() -> None:
         "analysis_contract": {
             "status": "exploratory post-hoc analysis after opening the holdout",
             "question": (
-                "does a final action-token feature change OpenVLA's action distribution "
-                "without producing a commensurate SAFE response, and does that mismatch "
-                "carry information about terminal policy failure"
+                "does an intervention change OpenVLA's action evidence without producing "
+                "a commensurate SAFE response, and does that mismatch carry information "
+                "about terminal policy failure"
             ),
             "same_feature": (
                 "OpenVLA action-head logits and SAFE both consume the seventh generated "
-                "token's final language-model feature"
+                "token's final language-model feature; because the command contains seven "
+                "separately generated tokens, full-token and executed-command measures are "
+                "reported as broader policy-output diagnostics"
             ),
-            "primary_policy_measure": (
-                "Jensen-Shannon divergence between clean and faulted distributions "
-                "conditional on the 256 decoded action tokens at the intervention step"
-            ),
+            "policy_measures": {
+                "same_feature_action_js_at_fault": (
+                    "Jensen-Shannon divergence for the seventh token, whose final feature "
+                    "is also SAFE's input"
+                ),
+                "full_action_mean_js_at_fault": (
+                    "mean Jensen-Shannon divergence across all seven generated action tokens"
+                ),
+                "executed_command_l2_at_fault": (
+                    "Euclidean displacement of the exact command sent to LIBERO"
+                ),
+            },
             "primary_monitor_measure": (
                 "absolute difference between paired SAFE-MLP score increments at the "
                 "intervention step"
             ),
             "outcome": (
                 "terminal task failure; no branch alarmed in the common 25-step window, "
-                "so later horizon-confounded alarms are not used as the target"
+                "so full-trajectory silent-versus-detected labels are reported only as "
+                "secondary outcome decompositions"
             ),
             "guardrail": (
                 "the transparent rank mismatch and fixed nested logistic models are "
@@ -229,19 +273,15 @@ def main() -> None:
                 "metric_comparisons": _metric_comparisons(
                     selected, args.bootstrap_samples, args.seed + 100 * index
                 ),
-                "same_feature_coupling": coupling_summary(selected),
+                "policy_monitor_coupling": {
+                    metric: coupling_summary(selected, action_metric=metric)
+                    for metric in POLICY_MEASURES
+                },
             }
             for index, (split, selected) in enumerate(split_rows.items())
         },
-        "rank_mismatch": rank_mismatch_diagnostic(
-            split_rows["development"], split_rows["holdout"]
-        ),
-        "nested_holdout_models": nested_holdout_models(
-            split_rows["development"],
-            split_rows["holdout"],
-            bootstrap_samples=args.bootstrap_samples,
-            seed=args.seed + 1_000,
-        ),
+        "rank_mismatch_by_policy_measure": rank_mismatch,
+        "nested_holdout_models_by_policy_measure": nested_models,
     }
     write_json_atomic(args.output, output)
     print(json.dumps(output, indent=2, sort_keys=True))
