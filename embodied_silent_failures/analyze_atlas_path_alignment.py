@@ -106,6 +106,10 @@ def main() -> None:
                 "control supplies each reference path, and windowed nearest-neighbor "
                 "alignment does not establish causal recoverability"
             ),
+            "posthoc_robustness": (
+                "because the unexplained-fraction result was inspected after scoring, "
+                "report its value again after removing exact same-clock rejoins"
+            ),
         },
         "sources": sources,
         "extraction_errors": errors,

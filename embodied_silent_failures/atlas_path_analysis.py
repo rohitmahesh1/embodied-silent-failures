@@ -333,6 +333,43 @@ def _declared_panels() -> tuple[tuple[int, int, str], ...]:
     )
 
 
+def exact_rejoin_diagnosis(
+    rows: list[dict[str, Any]], *, bootstrap_samples: int, seed: int
+) -> dict[str, Any]:
+    selected, measurements = _measurement_rows(
+        rows,
+        horizon=PRIMARY_HORIZON,
+        window=PRIMARY_WINDOW,
+        stream=PRIMARY_STREAM,
+    )
+    exact = [values["same_clock_distance"] == 0.0 for values in measurements]
+    nonexact_indices = [index for index, value in enumerate(exact) if not value]
+    nonexact_rows = [selected[index] for index in nonexact_indices]
+    nonexact_values = [
+        measurements[index]["unexplained_fraction"] for index in nonexact_indices
+    ]
+    return {
+        "exact_same_clock_rejoins": {
+            "failed": sum(
+                value and not row["faulted_success"]
+                for row, value in zip(selected, exact, strict=True)
+            ),
+            "successful": sum(
+                value and row["faulted_success"]
+                for row, value in zip(selected, exact, strict=True)
+            ),
+        },
+        "unexplained_fraction_after_excluding_exact_rejoins": (
+            signal_with_uncertainty(
+                nonexact_rows,
+                nonexact_values,
+                bootstrap_samples=bootstrap_samples,
+                seed=seed,
+            )
+        ),
+    }
+
+
 def analyze_path_alignment(
     rows: list[dict[str, Any]], *, bootstrap_samples: int, seed: int
 ) -> dict[str, Any]:
@@ -429,4 +466,12 @@ def analyze_path_alignment(
         },
         "declared_uncertainty_panels": uncertainty,
         "reentry_from_h5_to_h25": reentry,
+        "posthoc_exact_rejoin_diagnosis": {
+            split: exact_rejoin_diagnosis(
+                members,
+                bootstrap_samples=bootstrap_samples,
+                seed=seed + 30_000 + index,
+            )
+            for index, (split, members) in enumerate(split_rows.items())
+        },
     }

@@ -9,6 +9,7 @@ from embodied_silent_failures.atlas_path_alignment import (
     align_state_stream,
 )
 from embodied_silent_failures.atlas_path_analysis import (
+    exact_rejoin_diagnosis,
     paired_signal_difference,
     path_measurements,
 )
@@ -157,6 +158,51 @@ class AtlasPathAlignmentTests(unittest.TestCase):
                 "within_context_concordance_candidate_minus_baseline"
             ]["estimate"],
             1.0,
+        )
+
+    def test_exact_rejoin_diagnosis_separates_trivial_recovery(self) -> None:
+        def row(context, success, current, nearest):
+            return {
+                "context_id": context,
+                "task_id": 0,
+                "episode_index": 0,
+                "faulted_success": success,
+                "alignments": {
+                    "25": {
+                        "25": {
+                            "streams": {
+                                "simulator_state": {
+                                    "same_clock": {
+                                        "symmetric_normalized_difference_l2": current
+                                    },
+                                    "nearest_path": {
+                                        "symmetric_normalized_difference_l2": nearest,
+                                        "signed_step_offset": 0,
+                                    },
+                                    "unexplained_fraction": (
+                                        nearest / current if current else 0.0
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+
+        rows = [
+            row("a", True, 0.0, 0.0),
+            row("a", False, 2.0, 1.0),
+            row("b", True, 2.0, 1.0),
+            row("b", False, 4.0, 3.0),
+        ]
+
+        result = exact_rejoin_diagnosis(rows, bootstrap_samples=10, seed=2)
+
+        self.assertEqual(result["exact_same_clock_rejoins"]["successful"], 1)
+        self.assertEqual(result["exact_same_clock_rejoins"]["failed"], 0)
+        self.assertEqual(
+            result["unexplained_fraction_after_excluding_exact_rejoins"]["rows"],
+            3,
         )
 
 
