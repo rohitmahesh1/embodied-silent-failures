@@ -6,7 +6,10 @@ from pathlib import Path
 
 from embodied_silent_failures.artifacts import write_json_atomic
 from embodied_silent_failures.provenance import file_sha256, git_state, load_json
-from embodied_silent_failures.safe_trajectory_analysis import split_geometry_summary
+from embodied_silent_failures.safe_trajectory_analysis import (
+    attach_temporal_geometry,
+    split_geometry_summary,
+)
 
 
 def _arguments() -> argparse.Namespace:
@@ -42,6 +45,14 @@ def main() -> None:
             raise ValueError(f"array archive differs from {document_path}")
         with np.load(array_path, allow_pickle=False) as archive:
             physical_runs = archive["physical_runs"].astype(str).tolist()
+            temporal_arrays = {
+                name: archive[name]
+                for name in (
+                    "selected_feature_l2",
+                    "monitor_increment_delta",
+                    "clean_gradient_dot_delta",
+                )
+            }
         document_runs = [str(record["physical_run"]) for record in document["records"]]
         if physical_runs != document_runs:
             raise ValueError(f"array row order differs from {document_path}")
@@ -58,7 +69,10 @@ def main() -> None:
         window_steps = current_window if window_steps is None else window_steps
         if current_window != window_steps:
             raise ValueError("geometry documents used different trajectory windows")
-        records.extend(document["records"])
+        records.extend(
+            attach_temporal_geometry(record, temporal_arrays, index)
+            for index, record in enumerate(document["records"])
+        )
         errors.extend(document["error_records"])
         sources.append(
             {

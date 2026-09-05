@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from embodied_silent_failures.safe_trajectory_analysis import (
+    attach_temporal_geometry,
     binary_metric_summary,
     derived_geometry,
     quiet_failure_summary,
@@ -45,6 +46,19 @@ class SafeTrajectoryAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(result["roc_auc_for_larger_value"], 1.0)
         self.assertEqual(result["median_difference_positive_minus_negative"], 3.0)
+
+    def test_temporal_geometry_separates_fault_step_from_later_response(self) -> None:
+        import numpy as np
+
+        arrays = {
+            "selected_feature_l2": np.asarray([[2.0, 3.0, 4.0]]),
+            "monitor_increment_delta": np.asarray([[0.1, -0.2, 0.3]]),
+            "clean_gradient_dot_delta": np.asarray([[0.2, -0.4, 0.5]]),
+        }
+        result = attach_temporal_geometry({}, arrays, 0)
+        self.assertAlmostEqual(result["safe_response_at_fault"], 0.1)
+        self.assertAlmostEqual(result["later_safe_response_signed_sum"], 0.1)
+        self.assertAlmostEqual(result["later_safe_response_absolute_sum"], 0.5)
 
     def test_quiet_failure_group_uses_absolute_net_response(self) -> None:
         rows = [_record(float(value), failure=True) for value in range(1, 9)]

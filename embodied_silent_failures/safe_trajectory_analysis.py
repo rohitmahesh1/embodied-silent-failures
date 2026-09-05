@@ -21,6 +21,24 @@ METRICS = (
     "mean_relu_gate_flip_fraction",
 )
 
+TASK_BREAKDOWN_METRICS = (
+    "feature_displacement_l2_energy",
+    "safe_response_signed_sum",
+    "safe_response_absolute_sum",
+    "safe_response_cancellation_fraction",
+    "gradient_alignment_fraction",
+    "mean_relu_gate_flip_fraction",
+)
+
+TEMPORAL_FIELDS = (
+    "feature_displacement_at_fault",
+    "safe_response_at_fault",
+    "absolute_safe_response_at_fault",
+    "later_safe_response_signed_sum",
+    "later_safe_response_absolute_sum",
+    "later_gradient_projection_absolute_sum",
+)
+
 
 def derived_geometry(record: dict[str, Any]) -> dict[str, Any]:
     result = dict(record)
@@ -35,6 +53,23 @@ def derived_geometry(record: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     return result
+
+
+def attach_temporal_geometry(
+    record: dict[str, Any], arrays: dict[str, Any], index: int
+) -> dict[str, Any]:
+    response = arrays["monitor_increment_delta"][index]
+    displacement = arrays["selected_feature_l2"][index]
+    projection = arrays["clean_gradient_dot_delta"][index]
+    return {
+        **record,
+        "feature_displacement_at_fault": float(displacement[0]),
+        "safe_response_at_fault": float(response[0]),
+        "absolute_safe_response_at_fault": float(abs(response[0])),
+        "later_safe_response_signed_sum": float(response[1:].sum()),
+        "later_safe_response_absolute_sum": float(abs(response[1:]).sum()),
+        "later_gradient_projection_absolute_sum": float(abs(projection[1:]).sum()),
+    }
 
 
 def distribution(values: list[float]) -> dict[str, Any]:
@@ -195,6 +230,28 @@ def outcome_comparisons(
     return result
 
 
+def task_breakdown(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    failed = lambda row: bool(row["policy_failure"])
+    succeeded = lambda row: not bool(row["policy_failure"])
+    output = {}
+    for task in sorted({int(row["task_id"]) for row in rows}):
+        selected = [row for row in rows if int(row["task_id"]) == task]
+        output[str(task)] = {
+            "physical_continuations": len(selected),
+            "policy_failures": sum(row["policy_failure"] for row in selected),
+            "failure_vs_success": {
+                metric: binary_metric_summary(
+                    selected,
+                    metric=metric,
+                    positive=failed,
+                    negative=succeeded,
+                )
+                for metric in TASK_BREAKDOWN_METRICS
+            },
+        }
+    return output
+
+
 def rank_correlations(rows: list[dict[str, Any]]) -> dict[str, Any]:
     from scipy.stats import spearmanr
 
@@ -296,6 +353,9 @@ def split_geometry_summary(
                     "silent_failure",
                 )
             },
+            "alarms_within_25_steps": sum(
+                row["safe_alarm_within_25_steps"] for row in selected
+            ),
             "comparisons": outcome_comparisons(
                 selected,
                 bootstrap_samples=bootstrap_samples,
@@ -303,5 +363,15 @@ def split_geometry_summary(
             ),
             "relationships": rank_correlations(selected),
             "quiet_failures": quiet_failure_summary(selected),
+            "temporal_comparisons": {
+                metric: binary_metric_summary(
+                    selected,
+                    metric=metric,
+                    positive=lambda row: bool(row["policy_failure"]),
+                    negative=lambda row: not bool(row["policy_failure"]),
+                )
+                for metric in TEMPORAL_FIELDS
+            },
+            "by_task": task_breakdown(selected),
         }
     return result

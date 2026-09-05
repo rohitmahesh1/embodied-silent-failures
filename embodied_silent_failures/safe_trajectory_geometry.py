@@ -54,11 +54,10 @@ def physical_population(
 
         context = representative["context"]
         failed = bool(representative["policy_failure"])
-        alarm = bool(
-            representative["safe_faulted_evidence"]["alarms"][primary_alpha][
-                "post_fault_any"
-            ]["triggered"]
-        )
+        alarm_record = representative["safe_faulted_evidence"]["alarms"][
+            primary_alpha
+        ]
+        alarm = bool(alarm_record["post_fault_any"]["triggered"])
         population.append(
             {
                 "physical_run": run,
@@ -70,6 +69,12 @@ def physical_population(
                 "fault_step": int(context["policy_step"]),
                 "policy_failure": failed,
                 "safe_alarm_post_fault_any": alarm,
+                "safe_alarm_within_25_steps": bool(
+                    alarm_record["within_25_steps"]["triggered"]
+                ),
+                "safe_first_alarm_step": alarm_record["post_fault_any"][
+                    "first_step"
+                ],
                 "outcome_group": (
                     "detected_failure"
                     if failed and alarm

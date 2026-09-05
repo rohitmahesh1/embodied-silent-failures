@@ -30,7 +30,15 @@ def _site_record(
             "policy_step": 10,
         },
         "safe_faulted_evidence": {
-            "alarms": {"0.05": {"post_fault_any": {"triggered": alarm}}}
+            "alarms": {
+                "0.05": {
+                    "post_fault_any": {
+                        "triggered": alarm,
+                        "first_step": 40 if alarm else None,
+                    },
+                    "within_25_steps": {"triggered": False},
+                }
+            }
         },
     }
 
@@ -70,6 +78,7 @@ class SafeTrajectoryGeometryTests(unittest.TestCase):
         self.assertEqual(len(population), 1)
         self.assertEqual(population[0]["member_site_count"], 2)
         self.assertEqual(population[0]["outcome_group"], "silent_failure")
+        self.assertFalse(population[0]["safe_alarm_within_25_steps"])
 
     def test_window_geometry_separates_alignment_and_cancellation(self) -> None:
         import numpy as np
